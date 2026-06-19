@@ -667,6 +667,61 @@ function describeMate(mv, pos) {
   return `${pieceWord} ${sqName(mv.from)}→${sqName(mv.to)}#`;
 }
 
+// ---- Hanging-piece detection ----------------------------------------
+//
+// Mirror of `chess_engine.find_hanging_pieces`. A piece is "hanging"
+// for the side-to-move when the opponent can win material by
+// capturing it — either it's attacked and undefended, or the
+// cheapest attacker is worth less than the piece itself.
+
+function findAttackers(board, target, byWhite) {
+  const out = [];
+  for (let s = 0; s < 64; s++) {
+    const p = board[s];
+    if (!p) continue;
+    if ((p === p.toUpperCase()) !== byWhite) continue;
+    if (attacksFrom(board, s).includes(target)) out.push(s);
+  }
+  return out;
+}
+
+function findHangingPieces(pos, color) {
+  if (color === undefined) color = pos.sideToMove;
+  const white = color === "w";
+  const out = [];
+  for (let s = 0; s < 64; s++) {
+    const p = pos.board[s];
+    if (!p) continue;
+    if ((p === p.toUpperCase()) !== white) continue;
+    if (p.toUpperCase() === "K") continue;
+    const attackers = findAttackers(pos.board, s, !white);
+    if (!attackers.length) continue;
+    const defenders = findAttackers(pos.board, s, white);
+    const pieceVal = PIECE_VALUE[p.toUpperCase()];
+    const cheapestAtk = Math.min(
+      ...attackers.map((a) => PIECE_VALUE[pos.board[a].toUpperCase()])
+    );
+    if (!defenders.length || cheapestAtk < pieceVal) {
+      out.push({ square: s, piece: p, attackers, defenders });
+    }
+  }
+  return out;
+}
+
+/** Build a short human-readable description for a hanging piece,
+ *  e.g. "bishop on c4 (attacked by knight d6, undefended)". */
+function describeHanging(h) {
+  const pieceWord = pieceName(h.piece);
+  const sq = sqName(h.square);
+  const atkList = h.attackers
+    .map((a) => `${pieceName(state.positions[state.ply].board[a])} ${sqName(a)}`)
+    .join(", ");
+  const def = h.defenders.length
+    ? `defended by ${h.defenders.length}`
+    : "undefended";
+  return `${pieceWord} on ${sq} (attacked by ${atkList}; ${def})`;
+}
+
 // =====================================================================
 //  Game replay
 // =====================================================================
@@ -810,6 +865,7 @@ const els = {
   plyInd:       document.getElementById("ply-indicator"),
   moveList:     document.getElementById("move-list"),
   feedback:     document.getElementById("move-feedback"),
+  hangingWarn:  document.getElementById("hanging-warn"),
   openingInfo:  document.getElementById("opening-info"),
 };
 
@@ -1094,6 +1150,7 @@ function setPly(p) {
   highlightActivePly();
   renderPlayerBars();
   renderMoveFeedback();
+  renderHangingWarning();
   renderOpeningInfo();
   renderForkArrows();
   // Selecting a different ply clears any in-progress move pickup.
@@ -1152,6 +1209,89 @@ function renderMoveFeedback() {
   } else {
     fb.hidden = true;
   }
+}
+
+/** Warn about loose pieces on both sides:
+ *   - Side-to-move's own hanging pieces  → "you need to defend / move this"
+ *   - Opponent's hanging pieces           → "you can grab this for free"
+ *  Paints an amber ring on every hanging square. Suppressed when a
+ *  mate alarm is already firing (those are far more urgent and the
+ *  player can address the loose piece on the next ply).
+ */
+function renderHangingWarning() {
+  const panel = els.hangingWarn;
+  if (!panel) return;
+  panel.innerHTML = "";
+  // Clear any stale square outlines first.
+  for (const cell of els.board.children) cell.classList.remove("hanging");
+
+  const idx = state.ply;
+  const pos = state.positions[idx];
+  if (!pos) { panel.hidden = true; return; }
+
+  // Don't compete with mate warnings.
+  if (state.matesDelivered?.[idx]
+      || state.matesAllowed?.[idx]
+      || state.mateThreats?.[idx]) {
+    panel.hidden = true;
+    return;
+  }
+
+  const own       = findHangingPieces(pos, pos.sideToMove);
+  const opponent  = findHangingPieces(pos, pos.sideToMove === "w" ? "b" : "w");
+  if (!own.length && !opponent.length) {
+    panel.hidden = true;
+    return;
+  }
+
+  const sideWord = (c) => c === "w" ? "White" : "Black";
+
+  if (own.length) {
+    const sec = makeHangingSection(
+      `⚠ ${sideWord(pos.sideToMove)}: `
+        + (own.length === 1 ? "this piece is" : "these pieces are")
+        + " hanging",
+      own,
+    );
+    panel.appendChild(sec);
+  }
+  if (opponent.length) {
+    const oppColor = pos.sideToMove === "w" ? "b" : "w";
+    const sec = makeHangingSection(
+      `★ ${sideWord(oppColor)}: `
+        + (opponent.length === 1 ? "this piece is" : "these pieces are")
+        + " hanging — you can capture",
+      opponent,
+    );
+    sec.classList.add("opponent");
+    panel.appendChild(sec);
+  }
+
+  panel.hidden = false;
+}
+
+/** Build one labelled section of the hanging-warn panel. Also paints
+ *  the amber outline on each affected board square as a side-effect. */
+function makeHangingSection(headingText, list) {
+  const wrap = document.createElement("div");
+  wrap.className = "hw-section";
+
+  const heading = document.createElement("div");
+  heading.className = "hw-heading";
+  heading.textContent = headingText;
+  wrap.appendChild(heading);
+
+  const ul = document.createElement("ul");
+  ul.className = "hw-list";
+  for (const h of list) {
+    const li = document.createElement("li");
+    li.textContent = "• " + describeHanging(h);
+    ul.appendChild(li);
+    const cell = els.board.querySelector(`[data-idx="${h.square}"]`);
+    cell?.classList.add("hanging");
+  }
+  wrap.appendChild(ul);
+  return wrap;
 }
 
 /** Show the current opening name + typical replies for the side to

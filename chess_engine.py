@@ -552,3 +552,74 @@ def find_mate_threats(pos: Position) -> list:
     # A null move forfeits any en-passant right.
     swapped.ep = -1
     return find_mate_in_one(swapped)
+
+
+# ---------------------------------------------------------------------------
+#  Hanging-piece detection
+# ---------------------------------------------------------------------------
+
+def find_attackers(board: list, target: int, by_white: bool) -> list:
+    """Squares of pieces of the requested colour that attack `target`.
+
+    A piece "attacks" a square iff it could capture an enemy unit
+    there in a single move — for pawns this is the diagonal capture
+    square (not the push square). Mirrors :func:`is_attacked_by` but
+    returns the source squares rather than a boolean.
+    """
+    out = []
+    for s, p in enumerate(board):
+        if not p:
+            continue
+        if p.isupper() != by_white:
+            continue
+        if target in attacks_from(board, s):
+            out.append(s)
+    return out
+
+
+def find_hanging_pieces(pos: Position, color: Optional[str] = None) -> list:
+    """Return hanging pieces of `color` (defaults to the side-to-move).
+
+    A piece is "hanging" when at least one opponent piece attacks it
+    and either:
+
+    * it has no defenders, or
+    * the opponent's cheapest attacker is worth less than the piece
+      itself (so taking and being recaptured still wins material).
+
+    Each entry is a dict ``{"square", "piece", "attackers", "defenders"}``
+    where ``attackers`` and ``defenders`` are lists of source squares.
+
+    The king is excluded — a king under attack is "check", not
+    "hanging", and is handled elsewhere.
+
+    Pass ``color="w"`` / ``"b"`` to inspect a specific side; this is
+    used to warn the player both about their own loose pieces and
+    about *opponent* pieces they could grab for free.
+    """
+    if color is None:
+        color = pos.stm
+    white = color == "w"
+    out = []
+    for s, p in enumerate(pos.board):
+        if not p:
+            continue
+        if p.isupper() != white:
+            continue
+        if p.upper() == "K":
+            continue
+        attackers = find_attackers(pos.board, s, by_white=not white)
+        if not attackers:
+            continue
+        defenders = find_attackers(pos.board, s, by_white=white)
+        piece_val = PIECE_VALUE[p.upper()]
+        cheapest_atk = min(PIECE_VALUE[pos.board[a].upper()] for a in attackers)
+        if not defenders or cheapest_atk < piece_val:
+            out.append({
+                "square": s,
+                "piece": p,
+                "attackers": attackers,
+                "defenders": defenders,
+            })
+    return out
+

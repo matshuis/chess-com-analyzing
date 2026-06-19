@@ -509,3 +509,39 @@ body.games-collapsed main {
 #opening-info .op-replies .note {
   opacity: 0.85;
 }
+
+/* Hanging-piece warning: amber, less alarming than a mate balloon
+   but more prominent than the opening-info panel. */
+#hanging-warn {
+  --warn: #e0b75f;
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, var(--panel));
+  color: var(--warn);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  flex: 0 0 auto;
+}
+#hanging-warn .hw-section + .hw-section { margin-top: 0.45rem; }
+#hanging-warn .hw-heading { font-weight: 600; }
+#hanging-warn .hw-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.15rem 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+/* The "opponent has loose pieces" section is good news — tint green
+   so it visually contrasts with the amber "defend yours" section. */
+#hanging-warn .hw-section.opponent .hw-heading { color: var(--win); }
+#hanging-warn .hw-section.opponent .hw-list    { color: var(--win); }
+
+/* Subtle amber ring on board squares whose piece is currently hanging.
+   Uses inset box-shadow so it stacks with the .hi (last-move) and
+   .target (move-destination) pseudo-elements without conflicts. */
+.sq.hanging {
+  box-shadow: inset 0 0 0 3px #e0b75f;
+}
