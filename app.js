@@ -808,6 +808,7 @@ const els = {
   plyInd:       document.getElementById("ply-indicator"),
   moveList:     document.getElementById("move-list"),
   feedback:     document.getElementById("move-feedback"),
+  openingInfo:  document.getElementById("opening-info"),
 };
 
 function buildBoardSquares() {
@@ -1078,6 +1079,7 @@ function setPly(p) {
   highlightActivePly();
   renderPlayerBars();
   renderMoveFeedback();
+  renderOpeningInfo();
   renderForkArrows();
   // Selecting a different ply clears any in-progress move pickup.
   freePlay.selected = -1;
@@ -1137,6 +1139,64 @@ function renderMoveFeedback() {
   }
 }
 
+/** Show the current opening name + typical replies for the side to
+ *  move. Lookup is by SAN-prefix against `OPENING_BOOK`. Hidden once
+ *  the game has left book — at that point the suggestions would be
+ *  stale and the name no longer reflects the actual position. */
+function renderOpeningInfo() {
+  const panel = els.openingInfo;
+  if (!panel) return;
+  panel.innerHTML = "";
+
+  // Build the SAN-token list from the moves played up to the current
+  // ply, stripped of any check/mate suffix so they match book format.
+  const sans = state.sanList.slice(0, state.ply).map(stripSanSuffix);
+  const op = identifyOpening(sans);
+  // Only show the panel while we're sitting *exactly* on a known book
+  // node; once we go past it, hide everything.
+  if (!op || op.moves.length !== sans.length) {
+    panel.hidden = true;
+    return;
+  }
+
+  const name = document.createElement("div");
+  name.className = "op-name";
+  name.textContent = `📖 ${op.name}`;
+  panel.appendChild(name);
+
+  const plan = document.createElement("div");
+  plan.className = "op-plan";
+  plan.textContent = op.plan;
+  panel.appendChild(plan);
+
+  if (op.replies?.length) {
+    const sideToMove =
+      state.positions[state.ply].sideToMove === "w" ? "White" : "Black";
+    const heading = document.createElement("div");
+    heading.className = "op-plan";
+    heading.textContent = `Typical replies for ${sideToMove}:`;
+    panel.appendChild(heading);
+
+    const ul = document.createElement("ul");
+    ul.className = "op-replies";
+    for (const r of op.replies) {
+      const li = document.createElement("li");
+      const san = document.createElement("span");
+      san.className = "san";
+      san.textContent = r.san;
+      const note = document.createElement("span");
+      note.className = "note";
+      note.textContent = r.note;
+      li.appendChild(san);
+      li.appendChild(note);
+      ul.appendChild(li);
+    }
+    panel.appendChild(ul);
+  }
+
+  panel.hidden = false;
+}
+
 /** Turn a SAN token like "Qd5", "Nge7", "exd5", "O-O-O", "e8=Q+"
  *  into a readable English phrase used by the feedback balloon. */
 function spokenSan(san) {
@@ -1182,6 +1242,224 @@ function spokenSan(san) {
 
   const verb = captures ? "takes" : "to";
   return `${pieceWord}${disambigPhrase} ${verb} ${dest}${promo}${trail}`;
+}
+
+// ---- Opening book ---------------------------------------------------
+//
+// Mirror of `openings.py`. The lookup is purely string-based so the
+// two implementations are kept in sync by copying the table verbatim.
+// Each entry is `{ moves: [...SAN tokens], name, plan, replies: [{san, note}] }`.
+// `replies` are the typical next moves for the side whose turn it is
+// *after* the matched move list has been played.
+const OPENING_BOOK = [
+  // ---- 1.e4 ---------------------------------------------------------
+  {
+    moves: ["e4"],
+    name:  "King's Pawn Opening",
+    plan:  "White stakes out the centre and frees the king's bishop and queen.",
+    replies: [
+      { san: "e5", note: "Open Game — classical, symmetric centre." },
+      { san: "c5", note: "Sicilian Defence — fight for the centre asymmetrically." },
+      { san: "e6", note: "French Defence — solid, slightly cramped." },
+      { san: "c6", note: "Caro-Kann Defence — solid pawn structure." },
+    ],
+  },
+  {
+    moves: ["e4", "e5"],
+    name:  "Open Game",
+    plan:  "Both sides will develop knights and contest the d4/d5 squares.",
+    replies: [
+      { san: "Nf3", note: "King's Knight Opening — attacks e5 and prepares O-O." },
+      { san: "Nc3", note: "Vienna Game — flexible, often followed by f4." },
+      { san: "Bc4", note: "Bishop's Opening — aims at f7." },
+    ],
+  },
+  {
+    moves: ["e4", "e5", "Nf3"],
+    name:  "King's Knight Opening",
+    plan:  "Black must defend e5 immediately.",
+    replies: [
+      { san: "Nc6", note: "Standard development; supports e5." },
+      { san: "Nf6", note: "Petroff Defence — symmetric counter-attack on e4." },
+      { san: "d6",  note: "Philidor Defence — solid but passive." },
+    ],
+  },
+  {
+    moves: ["e4", "e5", "Nf3", "Nc6"],
+    name:  "King's Knight Opening (main line)",
+    plan:  "White picks how to pressure the centre and Black's knight.",
+    replies: [
+      { san: "Bb5", note: "Ruy López — pins the c6 knight and pressures e5." },
+      { san: "Bc4", note: "Italian Game — eyes f7, prepares quick castling." },
+      { san: "d4",  note: "Scotch Game — opens the centre immediately." },
+    ],
+  },
+  {
+    moves: ["e4", "e5", "Nf3", "Nc6", "Bb5"],
+    name:  "Ruy López (Spanish Opening)",
+    plan:  "Black usually challenges the bishop or supports the centre.",
+    replies: [
+      { san: "a6",  note: "Morphy Defence — the main line; asks the bishop a question." },
+      { san: "Nf6", note: "Berlin Defence — solid, leads to the famous endgame." },
+      { san: "d6",  note: "Steinitz Defence — old, very solid." },
+    ],
+  },
+  {
+    moves: ["e4", "e5", "Nf3", "Nc6", "Bc4"],
+    name:  "Italian Game",
+    plan:  "Black mirrors development and contests the centre.",
+    replies: [
+      { san: "Bc5", note: "Giuoco Piano — quiet, symmetric setup." },
+      { san: "Nf6", note: "Two Knights Defence — sharper, invites complications." },
+      { san: "Be7", note: "Hungarian Defence — solid and modest." },
+    ],
+  },
+  {
+    moves: ["e4", "c5"],
+    name:  "Sicilian Defence",
+    plan:  "White typically prepares Nf3 and d4 to open the centre.",
+    replies: [
+      { san: "Nf3", note: "Open Sicilian setup — most principled." },
+      { san: "Nc3", note: "Closed Sicilian — keeps the centre intact." },
+      { san: "c3",  note: "Alapin Variation — prepares d4 with a strong centre." },
+    ],
+  },
+  {
+    moves: ["e4", "e6"],
+    name:  "French Defence",
+    plan:  "Black will challenge the centre with ...d5 next move.",
+    replies: [
+      { san: "d4",  note: "Main line — claims the full centre." },
+      { san: "Nc3", note: "Flexible — keeps options open against ...d5." },
+      { san: "d3",  note: "King's Indian Attack setup." },
+    ],
+  },
+  {
+    moves: ["e4", "c6"],
+    name:  "Caro-Kann Defence",
+    plan:  "Black plans ...d5 with a sound pawn structure.",
+    replies: [
+      { san: "d4",  note: "Main line — accepts the central challenge." },
+      { san: "Nc3", note: "Two Knights setup — flexible." },
+      { san: "Nf3", note: "Two Knights Attack." },
+    ],
+  },
+
+  // ---- 1.d4 ---------------------------------------------------------
+  {
+    moves: ["d4"],
+    name:  "Queen's Pawn Opening",
+    plan:  "White stakes out d4 and prepares c4 to fight for the centre.",
+    replies: [
+      { san: "d5",  note: "Closed Game / Queen's Gambit territory." },
+      { san: "Nf6", note: "Indian Defence — flexible, avoids early ...d5." },
+      { san: "f5",  note: "Dutch Defence — fights for e4." },
+    ],
+  },
+  {
+    moves: ["d4", "d5"],
+    name:  "Closed Game",
+    plan:  "White's strongest try is to challenge d5 with c4.",
+    replies: [
+      { san: "c4",  note: "Queen's Gambit — the principled break." },
+      { san: "Nf3", note: "Quiet developing move; avoids the gambit." },
+      { san: "Bf4", note: "London System setup." },
+    ],
+  },
+  {
+    moves: ["d4", "d5", "c4"],
+    name:  "Queen's Gambit",
+    plan:  "Black chooses between accepting and declining the pawn.",
+    replies: [
+      { san: "e6",   note: "Queen's Gambit Declined — solid and classical." },
+      { san: "c6",   note: "Slav Defence — solid, keeps the c8 bishop free." },
+      { san: "dxc4", note: "Queen's Gambit Accepted — gives up the centre for development." },
+    ],
+  },
+  {
+    moves: ["d4", "Nf6"],
+    name:  "Indian Defence",
+    plan:  "White typically plays c4 to claim the centre.",
+    replies: [
+      { san: "c4",  note: "Main line — heads for King's/Queen's Indian territory." },
+      { san: "Nf3", note: "Avoids the sharpest lines." },
+      { san: "Bg5", note: "Trompowsky Attack — early pin." },
+    ],
+  },
+  {
+    moves: ["d4", "Nf6", "c4", "g6"],
+    name:  "King's Indian / Grünfeld setup",
+    plan:  "Black fianchettoes the king's bishop; White picks a centre.",
+    replies: [
+      { san: "Nc3", note: "Main line — invites the King's Indian or Grünfeld." },
+      { san: "Nf3", note: "Flexible; can transpose to Fianchetto systems." },
+    ],
+  },
+  {
+    moves: ["d4", "Nf6", "c4", "e6"],
+    name:  "Indian Defence (with ...e6)",
+    plan:  "Black is heading for the Nimzo-Indian or Queen's Indian.",
+    replies: [
+      { san: "Nc3", note: "Allows the Nimzo-Indian after ...Bb4." },
+      { san: "Nf3", note: "Avoids the Nimzo; invites the Queen's Indian." },
+    ],
+  },
+
+  // ---- Flank openings -----------------------------------------------
+  {
+    moves: ["c4"],
+    name:  "English Opening",
+    plan:  "White fights for d5 from the side before committing centre pawns.",
+    replies: [
+      { san: "e5",  note: "Reversed Sicilian — Black takes the initiative." },
+      { san: "Nf6", note: "Flexible; can transpose to many Indian setups." },
+      { san: "c5",  note: "Symmetric English — solid and balanced." },
+    ],
+  },
+  {
+    moves: ["Nf3"],
+    name:  "Réti Opening",
+    plan:  "White keeps the centre flexible and may fianchetto.",
+    replies: [
+      { san: "d5",  note: "Classical reply — claims the centre." },
+      { san: "Nf6", note: "Symmetric, very flexible." },
+    ],
+  },
+];
+
+/** Strip a trailing `+` or `#` from a SAN token so it can be matched
+ *  against the opening book's bare-move format. */
+function stripSanSuffix(san) {
+  if (!san) return san;
+  if (san.endsWith("+") || san.endsWith("#")) return san.slice(0, -1);
+  return san;
+}
+
+/** Return the deepest opening whose move list is a prefix of `sanMoves`,
+ *  or null if none matches. Mirror of `openings.identify_opening`. */
+function identifyOpening(sanMoves) {
+  const moves = sanMoves.map(stripSanSuffix);
+  let best = null;
+  for (const op of OPENING_BOOK) {
+    const n = op.moves.length;
+    if (n > moves.length) continue;
+    let ok = true;
+    for (let i = 0; i < n; i++) {
+      if (op.moves[i] !== moves[i]) { ok = false; break; }
+    }
+    if (ok && (!best || n > best.moves.length)) best = op;
+  }
+  return best;
+}
+
+/** Return suggested replies for the *current* opening node, or null
+ *  when we are beyond known theory or in an unknown line. Mirror of
+ *  `openings.suggest_responses`. */
+function suggestOpeningResponses(sanMoves) {
+  const moves = sanMoves.map(stripSanSuffix);
+  const op = identifyOpening(moves);
+  if (!op || op.moves.length !== moves.length) return null;
+  return { name: op.name, plan: op.plan, replies: op.replies };
 }
 
 // ---- Fork-arrow overlay ---------------------------------------------

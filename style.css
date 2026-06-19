@@ -430,3 +430,47 @@ main {
   border-color: var(--bf-border);
   background: var(--bf-bg);
 }
+
+/* Opening-book panel: shown below the alarm balloon when the
+   current position matches a known opening node. Quieter styling
+   than the alarm so it never competes with a tactical warning. */
+#opening-info {
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  flex: 0 0 auto;
+}
+#opening-info .op-name {
+  font-weight: 600;
+  margin-bottom: 0.15rem;
+}
+#opening-info .op-plan {
+  opacity: 0.8;
+  margin-bottom: 0.35rem;
+}
+#opening-info .op-replies {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+#opening-info .op-replies li {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+}
+#opening-info .op-replies .san {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  min-width: 3em;
+  color: var(--accent, #8ab4f8);
+}
+#opening-info .op-replies .note {
+  opacity: 0.85;
+}
