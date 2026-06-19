@@ -1387,9 +1387,17 @@ function init() {
     else if (ev.key === "End")        { setPly(state.positions.length - 1); ev.preventDefault(); }
   });
 
-  // Pre-fill from URL: ?user=<name> auto-loads on page open.
+  // Pre-fill from URL: either /<name> in the path or ?user=<name>
+  // in the query string auto-loads on page open.
   const params = new URLSearchParams(window.location.search);
-  const urlUser = (params.get("user") || "").trim().toLowerCase();
+  const pathUser = decodeURIComponent(window.location.pathname.replace(/^\/+|\/+$/g, ""))
+    .trim().toLowerCase();
+  const queryUser = (params.get("user") || "").trim().toLowerCase();
+  // Ignore path segments that look like file assets (contain a dot)
+  // so requests for app.js, style.css, favicon.ico, etc. don't get
+  // mistaken for usernames.
+  const urlUser = (pathUser && !pathUser.includes(".") ? pathUser : "")
+    || queryUser;
   if (urlUser) {
     els.usernameIn.value = urlUser;
     loadFromChessCom(urlUser);
