@@ -17,6 +17,7 @@ from chess_engine import (
     Move, Position,
     allows_mate_in_one,
     find_mate_in_one,
+    find_mate_threats,
     in_check,
     is_checkmate,
     legal_moves,
@@ -105,3 +106,32 @@ def test_find_mate_in_one_returns_qxf2():
     )
     assert sq_name(mates[0].frm) == "f6"
     assert sq_name(mates[0].to)  == "f2"
+
+
+def test_mate_threat_is_visible_before_white_blunders():
+    """Before 4.Nc3, White should already see that Black threatens Qxf2#.
+
+    This is the warning the UI should show *before* the player moves —
+    so they can choose a defensive reply instead of walking into mate.
+    """
+    pos = Position.from_fen(POS_BEFORE_NC3)
+    threats = find_mate_threats(pos)
+    assert threats, (
+        "Expected Black's Qxf2# to be detected as a threat against White."
+    )
+    qxf2 = next(
+        (m for m in threats
+         if sq_name(m.frm) == "f6" and sq_name(m.to) == "f2"),
+        None,
+    )
+    assert qxf2 is not None, (
+        f"Expected Qxf2 in the threats list; got {[m.uci() for m in threats]}"
+    )
+
+
+def test_no_mate_threat_in_starting_position():
+    """The opening position has no mate threats either way."""
+    pos = Position.from_fen(
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    )
+    assert find_mate_threats(pos) == []

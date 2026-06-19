@@ -613,6 +613,23 @@ function findMateInOne(pos) {
   return out;
 }
 
+/** Opponent mate-in-one moves the side-to-move must address.
+ *
+ *  "If I (side-to-move) passed, could my opponent immediately
+ *  checkmate me?" Used to *warn* the player before they walk into a
+ *  forced mate, rather than only telling them after the fact.
+ *
+ *  Returns [] when side-to-move is already in check — the check
+ *  itself is the more pressing issue and a position with both kings
+ *  under attack is illegal anyway. */
+function findMateThreats(pos) {
+  if (inCheck(pos)) return [];
+  const swapped = clonePosition(pos);
+  swapped.sideToMove = pos.sideToMove === "w" ? "b" : "w";
+  swapped.epTarget = -1; // a null move forfeits en-passant rights
+  return findMateInOne(swapped);
+}
+
 /** Convert a {from,to,promotion} move from `legalMoves` into the
  *  SAN-shaped object that `applyMove` expects. */
 function sanMoveFor(pos, mv) {
@@ -691,10 +708,16 @@ function replayPgn(pgn) {
   //                         the threat, or failed to escape it).
   //   * matesDelivered[i] — non-null if the move that produced
   //                         positions[i] is itself checkmate.
+  //   * mateThreats[i]    — non-null if, *at* positions[i], the
+  //                         side-to-move faces an opponent
+  //                         mate-in-one they must address. This is
+  //                         the forward-looking warning shown to the
+  //                         player who is about to move.
   const blunders       = new Array(positions.length).fill(null);
   const goodMoves      = new Array(positions.length).fill(null);
   const matesAllowed   = new Array(positions.length).fill(null);
   const matesDelivered = new Array(positions.length).fill(null);
+  const mateThreats    = new Array(positions.length).fill(null);
   let prevForks = findForks(positions[0]);
   for (let i = 1; i < positions.length; i++) {
     // Was the move just played one of the forks that were available?
@@ -728,7 +751,16 @@ function replayPgn(pgn) {
     }
   }
 
-  return { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered };
+  // Forward-looking threat: at each position, what mate-in-one moves
+  // does the opponent threaten against the side-to-move? Computed for
+  // every position (including the starting one) so the warning is
+  // visible the moment the player navigates there.
+  for (let i = 0; i < positions.length; i++) {
+    const threats = findMateThreats(positions[i]);
+    if (threats.length) mateThreats[i] = threats;
+  }
+
+  return { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered, mateThreats };
 }
 
 // =====================================================================
@@ -746,6 +778,7 @@ const state = {
   goodMoves: [],
   matesAllowed: [],
   matesDelivered: [],
+  mateThreats: [],
   ply: 0, // index into positions
   orientation: "w", // "w" = white at the bottom, "b" = black at the bottom
 };
@@ -1065,6 +1098,7 @@ function renderMoveFeedback() {
   const good          = state.goodMoves[idx];
   const mateAllowed   = state.matesAllowed?.[idx];
   const mateDelivered = state.matesDelivered?.[idx];
+  const mateThreat    = state.mateThreats?.[idx];
   if (mateDelivered) {
     fb.hidden = false;
     fb.classList.add("good");
@@ -1076,6 +1110,19 @@ function renderMoveFeedback() {
       .map((m) => describeMate(m, state.positions[idx]))
       .join("; ");
     fb.textContent = `⚠ ${spoken} (??) — allows mate-in-one: ${detail}`;
+  } else if (mateThreat) {
+    // Forward-looking warning shown *before* the player walks into a
+    // mate. The threatening side is whoever just moved — i.e. the
+    // opposite of the side-to-move in the current position.
+    fb.hidden = false;
+    fb.classList.add("blunder");
+    const threatColor =
+      state.positions[idx].sideToMove === "w" ? "Black" : "White";
+    const detail = mateThreat
+      .map((m) => describeMate(m, state.positions[idx]))
+      .join("; ");
+    fb.textContent =
+      `⚠ Watch out — ${threatColor} threatens mate-in-one: ${detail}`;
   } else if (blunder) {
     fb.hidden = false;
     fb.classList.add("blunder");
@@ -1147,6 +1194,8 @@ function svgEl(name, attrs = {}) {
 
 /** Draw arrows for whatever annotation lives on the current ply:
  *  - Allowed mate-in-one (red): one from→to arrow per mating move.
+ *  - Opponent mate threat (red): same arrow drawn *before* the player
+ *    blunders, as a heads-up.
  *  - Fork blunder (red): dashed from→to plus solid arrows to each target.
  *  - Executed fork (green): solid arrows to each target.
  *  Mate that was actually delivered is *not* drawn — the last-move
@@ -1158,11 +1207,11 @@ function renderForkArrows() {
   svg.innerHTML = "";
 
   const idx = state.ply;
-  if (idx <= 0) return;
-  const blunder       = state.blunders[idx];
-  const good          = state.goodMoves[idx];
+  const blunder       = state.ply > 0 ? state.blunders[idx]    : null;
+  const good          = state.ply > 0 ? state.goodMoves[idx]   : null;
   const mateAllowed   = state.matesAllowed?.[idx];
   const mateDelivered = state.matesDelivered?.[idx];
+  const mateThreat    = state.mateThreats?.[idx];
 
   // Build a list of "shapes" to draw. Each shape has a colour class
   // ("blunder" / "good") and either:
@@ -1174,6 +1223,12 @@ function renderForkArrows() {
     // arrows and the last-move highlight already makes it obvious.
   } else if (mateAllowed) {
     for (const m of mateAllowed) {
+      shapes.push({ kind: "mate", move: m, cls: "blunder" });
+    }
+  } else if (mateThreat) {
+    // Same visual as an allowed mate — the threat is the opponent's
+    // upcoming mating move, drawn so the player can see what to defend.
+    for (const m of mateThreat) {
       shapes.push({ kind: "mate", move: m, cls: "blunder" });
     }
   } else if (blunder) {
@@ -1347,7 +1402,7 @@ function selectGame(idx) {
   const g = state.games[idx];
   if (!g) return;
 
-  const { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered }
+  const { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered, mateThreats }
     = replayPgn(g.pgn || "");
   state.positions = positions;
   state.sanList = sanList;
@@ -1355,6 +1410,7 @@ function selectGame(idx) {
   state.goodMoves = goodMoves;
   state.matesAllowed = matesAllowed;
   state.matesDelivered = matesDelivered;
+  state.mateThreats = mateThreats;
   state.ply = 0;
 
   // Orient the board so the queried player is always at the bottom.
@@ -1632,6 +1688,9 @@ function makeUserMove(from, to, promotion) {
     ? { from, to }
     : null;
   const allowed = delivered ? null : findMateInOne(next);
+  // Forward-looking: does the new position contain an opponent
+  // mate-in-one threat that the next side-to-move must address?
+  const threats = delivered ? null : findMateThreats(next);
 
   // Truncate any forward history before appending.
   state.positions      = state.positions.slice(0, state.ply + 1);
@@ -1640,6 +1699,7 @@ function makeUserMove(from, to, promotion) {
   state.goodMoves      = state.goodMoves.slice(0, state.ply + 1);
   state.matesAllowed   = state.matesAllowed.slice(0, state.ply + 1);
   state.matesDelivered = state.matesDelivered.slice(0, state.ply + 1);
+  state.mateThreats    = state.mateThreats.slice(0, state.ply + 1);
 
   state.positions.push(next);
   state.sanList.push(moveObj.san + (delivered ? "#" : ""));
@@ -1647,6 +1707,7 @@ function makeUserMove(from, to, promotion) {
   state.goodMoves.push(executed || null);
   state.matesAllowed.push(allowed && allowed.length ? allowed : null);
   state.matesDelivered.push(delivered);
+  state.mateThreats.push(threats && threats.length ? threats : null);
 
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
@@ -1730,6 +1791,7 @@ function resetFreePlay() {
   state.goodMoves = [null];
   state.matesAllowed = [null];
   state.matesDelivered = [null];
+  state.mateThreats = [null];
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
   renderMoveList();
@@ -1755,6 +1817,7 @@ function init() {
   state.goodMoves = [null];
   state.matesAllowed = [null];
   state.matesDelivered = [null];
+  state.mateThreats = [null];
   setPly(0);
   updateFreePlayChrome();
 

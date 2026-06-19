@@ -533,3 +533,22 @@ def allows_mate_in_one(pos: Position, move: Move) -> list:
     """
     after = make_move(pos, move)
     return find_mate_in_one(after)
+
+
+def find_mate_threats(pos: Position) -> list:
+    """Opponent mate-in-one moves the side-to-move must address.
+
+    "If I (side-to-move) passed, could my opponent immediately
+    checkmate me?" Returns the list of such mating moves. Used to
+    warn the player *before* they blunder rather than after.
+
+    Returns an empty list when side-to-move is already in check — the
+    check itself is the more urgent thing to handle, and a position
+    with two kings under attack is illegal anyway.
+    """
+    if in_check(pos):
+        return []
+    swapped = _swap_side(pos)
+    # A null move forfeits any en-passant right.
+    swapped.ep = -1
+    return find_mate_in_one(swapped)
