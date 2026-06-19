@@ -375,6 +375,14 @@ main {
   overflow-y: auto;
 }
 #move-list .num { color: var(--muted); text-align: right; padding-right: 0.25rem; }
+#move-list .head {
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 0.3rem 0.25rem;
+  border-bottom: 1px solid var(--border);
+}
 #move-list .ply { padding: 0.1rem 0.3rem; cursor: pointer; border-radius: 3px; }
 #move-list .ply:hover { background: var(--panel-2); }
 #move-list .ply.active { background: var(--accent-2); color: white; }

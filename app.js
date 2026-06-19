@@ -1006,6 +1006,19 @@ function renderBoard(pos) {
 function renderMoveList() {
   els.moveList.innerHTML = "";
   const total = state.sanList.length;
+
+  // Column headers — leave the move-number column blank and label the
+  // two ply columns "White" / "Black" so the grid is self-explanatory.
+  const blank = document.createElement("div");
+  blank.className = "head";
+  els.moveList.appendChild(blank);
+  for (const side of ["White", "Black"]) {
+    const h = document.createElement("div");
+    h.className = "head";
+    h.textContent = side;
+    els.moveList.appendChild(h);
+  }
+
   for (let i = 0; i < total; i += 2) {
     const num = document.createElement("div");
     num.className = "num";
