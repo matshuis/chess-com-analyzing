@@ -1873,9 +1873,6 @@ function selectGame(idx) {
     li.classList.toggle("active", parseInt(li.dataset.idx, 10) === idx);
   }
   updateFreePlayChrome();
-  // Auto-collapse the games sidebar so the board has more room.
-  // The user can re-open it any time via the toggle button.
-  setGameListCollapsed(true);
 }
 
 /** Collapse or expand the games sidebar. When collapsed the panel
