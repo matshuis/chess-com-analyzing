@@ -1,0 +1,958 @@
+/* chess.com analyzer — vanilla JS app
+ *
+ *   - Loads games.json (produced by download_games.py)
+ *   - Renders a list of games in the left pane
+ *   - On selection, parses the PGN, generates the full position list and
+ *     lets the user step through plies with buttons / arrow keys / by
+ *     clicking a move in the move list.
+ *
+ * Everything is intentionally self-contained — no build step, no
+ * dependencies.  The chess logic is the minimum needed to replay a
+ * legal game (SAN, captures, castling, en passant, promotion).
+ */
+
+"use strict";
+
+// =====================================================================
+//  Board model
+// =====================================================================
+//
+// A square is encoded as an integer 0..63 with rank 0 = white's first
+// rank ("1") and file 0 = a-file.  Pieces are single chars: uppercase
+// = white, lowercase = black, "" = empty square.
+//   P/p  pawn      N/n  knight    B/b  bishop
+//   R/r  rook      Q/q  queen     K/k  king
+
+const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
+const PIECE_GLYPHS = {
+  K: "\u2654", Q: "\u2655", R: "\u2656", B: "\u2657", N: "\u2658", P: "\u2659",
+  k: "\u265A", q: "\u265B", r: "\u265C", b: "\u265D", n: "\u265E", p: "\u265F",
+};
+
+const sq = (file, rank) => rank * 8 + file;
+const fileOf = (s) => s & 7;
+const rankOf = (s) => s >> 3;
+const sqName = (s) => FILES[fileOf(s)] + (rankOf(s) + 1);
+const parseSquare = (name) => sq(name.charCodeAt(0) - 97, parseInt(name[1], 10) - 1);
+const isWhite = (p) => p && p === p.toUpperCase();
+const isBlack = (p) => p && p === p.toLowerCase();
+const sameColor = (a, b) => a && b && (isWhite(a) === isWhite(b));
+
+function initialPosition() {
+  const board = new Array(64).fill("");
+  const back = ["R", "N", "B", "Q", "K", "B", "N", "R"];
+  for (let f = 0; f < 8; f++) {
+    board[sq(f, 0)] = back[f];
+    board[sq(f, 1)] = "P";
+    board[sq(f, 6)] = "p";
+    board[sq(f, 7)] = back[f].toLowerCase();
+  }
+  return {
+    board,
+    sideToMove: "w",
+    castling: { K: true, Q: true, k: true, q: true },
+    epTarget: -1,        // -1 = none
+    lastMove: null,      // { from, to }
+  };
+}
+
+function clonePosition(p) {
+  return {
+    board: p.board.slice(),
+    sideToMove: p.sideToMove,
+    castling: { ...p.castling },
+    epTarget: p.epTarget,
+    lastMove: p.lastMove,
+  };
+}
+
+// ---- Attack detection ------------------------------------------------
+const KNIGHT_DELTAS = [[1,2],[2,1],[2,-1],[1,-2],[-1,-2],[-2,-1],[-2,1],[-1,2]];
+const ROOK_DIRS     = [[1,0],[-1,0],[0,1],[0,-1]];
+const BISHOP_DIRS   = [[1,1],[1,-1],[-1,1],[-1,-1]];
+const KING_DELTAS   = [...ROOK_DIRS, ...BISHOP_DIRS];
+
+function isSquareAttackedBy(board, target, byWhite) {
+  const tf = fileOf(target), tr = rankOf(target);
+
+  // Pawns
+  const pawnDir = byWhite ? -1 : 1; // attacker pawn came from this rank delta
+  const pawnPiece = byWhite ? "P" : "p";
+  for (const df of [-1, 1]) {
+    const f = tf + df, r = tr + pawnDir;
+    if (f >= 0 && f < 8 && r >= 0 && r < 8 && board[sq(f, r)] === pawnPiece) return true;
+  }
+
+  // Knights
+  const knightPiece = byWhite ? "N" : "n";
+  for (const [df, dr] of KNIGHT_DELTAS) {
+    const f = tf + df, r = tr + dr;
+    if (f >= 0 && f < 8 && r >= 0 && r < 8 && board[sq(f, r)] === knightPiece) return true;
+  }
+
+  // King (adjacent)
+  const kingPiece = byWhite ? "K" : "k";
+  for (const [df, dr] of KING_DELTAS) {
+    const f = tf + df, r = tr + dr;
+    if (f >= 0 && f < 8 && r >= 0 && r < 8 && board[sq(f, r)] === kingPiece) return true;
+  }
+
+  // Sliding: rook/queen orthogonally, bishop/queen diagonally
+  const rookLike  = byWhite ? ["R", "Q"] : ["r", "q"];
+  const bishopLike = byWhite ? ["B", "Q"] : ["b", "q"];
+  for (const [df, dr] of ROOK_DIRS) {
+    let f = tf + df, r = tr + dr;
+    while (f >= 0 && f < 8 && r >= 0 && r < 8) {
+      const p = board[sq(f, r)];
+      if (p) { if (rookLike.includes(p)) return true; break; }
+      f += df; r += dr;
+    }
+  }
+  for (const [df, dr] of BISHOP_DIRS) {
+    let f = tf + df, r = tr + dr;
+    while (f >= 0 && f < 8 && r >= 0 && r < 8) {
+      const p = board[sq(f, r)];
+      if (p) { if (bishopLike.includes(p)) return true; break; }
+      f += df; r += dr;
+    }
+  }
+  return false;
+}
+
+function findKing(board, white) {
+  const k = white ? "K" : "k";
+  for (let i = 0; i < 64; i++) if (board[i] === k) return i;
+  return -1;
+}
+
+// ---- Pseudo-legal source candidates ---------------------------------
+//
+// Given a target square and a piece type for the side-to-move, return
+// the list of source squares that can pseudo-legally reach the target.
+function candidateSources(pos, pieceUpper, to, isCapture) {
+  const white = pos.sideToMove === "w";
+  const piece = white ? pieceUpper : pieceUpper.toLowerCase();
+  const sources = [];
+  const tf = fileOf(to), tr = rankOf(to);
+
+  if (pieceUpper === "P") {
+    const dir = white ? 1 : -1;
+    if (isCapture) {
+      for (const df of [-1, 1]) {
+        const f = tf - df, r = tr - dir;
+        if (f < 0 || f > 7 || r < 0 || r > 7) continue;
+        if (pos.board[sq(f, r)] === piece) sources.push(sq(f, r));
+      }
+    } else {
+      // single push
+      const r1 = tr - dir;
+      if (r1 >= 0 && r1 < 8 && pos.board[sq(tf, r1)] === piece) {
+        sources.push(sq(tf, r1));
+      } else {
+        // double push: from rank 1 (white) / 6 (black) only
+        const startRank = white ? 1 : 6;
+        const r2 = tr - 2 * dir;
+        if (
+          r2 === startRank &&
+          pos.board[sq(tf, r2)] === piece &&
+          pos.board[sq(tf, r1)] === ""
+        ) sources.push(sq(tf, r2));
+      }
+    }
+    return sources;
+  }
+
+  if (pieceUpper === "N") {
+    for (const [df, dr] of KNIGHT_DELTAS) {
+      const f = tf + df, r = tr + dr;
+      if (f >= 0 && f < 8 && r >= 0 && r < 8 && pos.board[sq(f, r)] === piece) {
+        sources.push(sq(f, r));
+      }
+    }
+    return sources;
+  }
+
+  if (pieceUpper === "K") {
+    for (const [df, dr] of KING_DELTAS) {
+      const f = tf + df, r = tr + dr;
+      if (f >= 0 && f < 8 && r >= 0 && r < 8 && pos.board[sq(f, r)] === piece) {
+        sources.push(sq(f, r));
+      }
+    }
+    return sources;
+  }
+
+  // Sliding pieces: B / R / Q
+  const dirs = pieceUpper === "B" ? BISHOP_DIRS
+            : pieceUpper === "R" ? ROOK_DIRS
+            : KING_DELTAS; // Q
+  for (const [df, dr] of dirs) {
+    let f = tf + df, r = tr + dr;
+    while (f >= 0 && f < 8 && r >= 0 && r < 8) {
+      const here = pos.board[sq(f, r)];
+      if (here) {
+        if (here === piece) sources.push(sq(f, r));
+        break;
+      }
+      f += df; r += dr;
+    }
+  }
+  return sources;
+}
+
+// =====================================================================
+//  PGN / SAN parsing
+// =====================================================================
+
+function tokenizePgnMoves(pgn) {
+  // Strip the tag pair section (lines beginning with "[") at the top.
+  let body = pgn.replace(/^\s*(?:\[[^\]]*\]\s*)+/m, "");
+
+  // Strip comments {...}
+  body = body.replace(/\{[^}]*\}/g, " ");
+
+  // Strip variations (...) – iteratively to handle nesting
+  let prev;
+  do { prev = body; body = body.replace(/\([^()]*\)/g, " "); } while (body !== prev);
+
+  // NAGs ($1, $14, ...)
+  body = body.replace(/\$\d+/g, " ");
+
+  // Move numbers: "12." or "12..."
+  body = body.replace(/\b\d+\.(\.\.)?/g, " ");
+
+  // Result tokens
+  body = body.replace(/\b(?:1-0|0-1|1\/2-1\/2|\*)\b/g, " ");
+
+  return body.trim().split(/\s+/).filter(Boolean);
+}
+
+function parseSan(san) {
+  const move = {
+    castle: null,
+    piece: null,
+    fromFile: -1,
+    fromRank: -1,
+    to: -1,
+    capture: false,
+    promotion: null,
+    check: false,
+    mate: false,
+    san,
+  };
+
+  // Some PGN exporters tack on an annotation like !? or ?!
+  let s = san.replace(/[!?]+$/, "");
+  if (s.endsWith("#")) { move.mate = true; s = s.slice(0, -1); }
+  else if (s.endsWith("+")) { move.check = true; s = s.slice(0, -1); }
+
+  if (s === "O-O" || s === "0-0")     { move.castle = "K"; return move; }
+  if (s === "O-O-O" || s === "0-0-0") { move.castle = "Q"; return move; }
+
+  const promoMatch = s.match(/=([QRBN])$/);
+  if (promoMatch) { move.promotion = promoMatch[1]; s = s.slice(0, -2); }
+
+  const toMatch = s.match(/([a-h])([1-8])$/);
+  if (!toMatch) throw new Error("Cannot parse SAN: " + san);
+  move.to = parseSquare(toMatch[1] + toMatch[2]);
+  s = s.slice(0, -2);
+
+  if (s.endsWith("x")) { move.capture = true; s = s.slice(0, -1); }
+
+  if (s.length && /[KQRBN]/.test(s[0])) { move.piece = s[0]; s = s.slice(1); }
+  else                                  { move.piece = "P"; }
+
+  for (const ch of s) {
+    if (ch >= "a" && ch <= "h") move.fromFile = ch.charCodeAt(0) - 97;
+    else if (ch >= "1" && ch <= "8") move.fromRank = parseInt(ch, 10) - 1;
+  }
+  return move;
+}
+
+// =====================================================================
+//  Move application
+// =====================================================================
+
+function applyMove(prevPos, move) {
+  const pos = clonePosition(prevPos);
+  const white = pos.sideToMove === "w";
+
+  // Handle castling first.
+  if (move.castle) {
+    const rank = white ? 0 : 7;
+    const kingFrom = sq(4, rank);
+    const kingTo   = move.castle === "K" ? sq(6, rank) : sq(2, rank);
+    const rookFrom = move.castle === "K" ? sq(7, rank) : sq(0, rank);
+    const rookTo   = move.castle === "K" ? sq(5, rank) : sq(3, rank);
+    pos.board[kingTo]   = pos.board[kingFrom];
+    pos.board[kingFrom] = "";
+    pos.board[rookTo]   = pos.board[rookFrom];
+    pos.board[rookFrom] = "";
+    if (white) { pos.castling.K = false; pos.castling.Q = false; }
+    else       { pos.castling.k = false; pos.castling.q = false; }
+    pos.epTarget = -1;
+    pos.lastMove = { from: kingFrom, to: kingTo };
+    pos.sideToMove = white ? "b" : "w";
+    return pos;
+  }
+
+  // Find the source square.
+  const candidates = candidateSources(pos, move.piece, move.to, move.capture);
+  const filtered = candidates.filter((src) => {
+    if (move.fromFile !== -1 && fileOf(src) !== move.fromFile) return false;
+    if (move.fromRank !== -1 && rankOf(src) !== move.fromRank) return false;
+    return true;
+  });
+
+  let from = -1;
+  if (filtered.length === 1) {
+    from = filtered[0];
+  } else if (filtered.length > 1) {
+    // Disambiguate via a king-safety check (pin detection).
+    for (const src of filtered) {
+      if (!leavesKingInCheck(pos, src, move)) { from = src; break; }
+    }
+    if (from === -1) from = filtered[0];
+  } else {
+    throw new Error(`No source for SAN "${move.san}" at ply (${pos.sideToMove})`);
+  }
+
+  // Apply move
+  const piece = pos.board[from];
+  let captureSquare = move.to;
+
+  // En passant capture: pawn moving diagonally to empty square hitting epTarget.
+  if (move.piece === "P" && move.capture && pos.board[move.to] === "" && move.to === pos.epTarget) {
+    captureSquare = sq(fileOf(move.to), rankOf(from));
+  }
+
+  pos.board[captureSquare] = "";
+  pos.board[from] = "";
+  pos.board[move.to] = move.promotion
+    ? (white ? move.promotion : move.promotion.toLowerCase())
+    : piece;
+
+  // Update castling rights.
+  if (piece === "K") { pos.castling.K = false; pos.castling.Q = false; }
+  if (piece === "k") { pos.castling.k = false; pos.castling.q = false; }
+  if (from === sq(0, 0) || captureSquare === sq(0, 0)) pos.castling.Q = false;
+  if (from === sq(7, 0) || captureSquare === sq(7, 0)) pos.castling.K = false;
+  if (from === sq(0, 7) || captureSquare === sq(0, 7)) pos.castling.q = false;
+  if (from === sq(7, 7) || captureSquare === sq(7, 7)) pos.castling.k = false;
+
+  // Update en-passant target.
+  if (move.piece === "P" && Math.abs(rankOf(move.to) - rankOf(from)) === 2) {
+    pos.epTarget = sq(fileOf(from), (rankOf(from) + rankOf(move.to)) / 2);
+  } else {
+    pos.epTarget = -1;
+  }
+
+  pos.lastMove = { from, to: move.to };
+  pos.sideToMove = white ? "b" : "w";
+  return pos;
+}
+
+function leavesKingInCheck(pos, from, move) {
+  // Apply the move to a scratch board and test king safety.
+  const test = clonePosition(pos);
+  const piece = test.board[from];
+  let captureSquare = move.to;
+  if (move.piece === "P" && move.capture && test.board[move.to] === "" && move.to === test.epTarget) {
+    captureSquare = sq(fileOf(move.to), rankOf(from));
+  }
+  test.board[captureSquare] = "";
+  test.board[from] = "";
+  test.board[move.to] = move.promotion
+    ? (test.sideToMove === "w" ? move.promotion : move.promotion.toLowerCase())
+    : piece;
+  const white = test.sideToMove === "w";
+  const kingSq = findKing(test.board, white);
+  if (kingSq === -1) return false;
+  return isSquareAttackedBy(test.board, kingSq, !white);
+}
+
+// =====================================================================
+//  Game replay
+// =====================================================================
+
+/** Build the full list of positions for a PGN, one entry per ply
+ *  (positions[0] = initial, positions[i] = after the i-th half-move). */
+function replayPgn(pgn) {
+  const tokens = tokenizePgnMoves(pgn);
+  const positions = [initialPosition()];
+  const sanList = [];
+  for (const tok of tokens) {
+    try {
+      const move = parseSan(tok);
+      const next = applyMove(positions[positions.length - 1], move);
+      positions.push(next);
+      sanList.push(tok);
+    } catch (err) {
+      console.warn("Stopped replay at", tok, err.message);
+      break;
+    }
+  }
+  return { positions, sanList };
+}
+
+// =====================================================================
+//  UI
+// =====================================================================
+
+const state = {
+  username: null,
+  games: [],
+  filteredIndices: [],
+  selectedGameIdx: -1,
+  positions: [initialPosition()],
+  sanList: [],
+  ply: 0, // index into positions
+  orientation: "w", // "w" = white at the bottom, "b" = black at the bottom
+};
+
+const els = {
+  form:         document.getElementById("load-form"),
+  usernameIn:   document.getElementById("username-input"),
+  loadBtn:      document.getElementById("load-btn"),
+  cancelBtn:    document.getElementById("cancel-btn"),
+  statusLabel:  document.getElementById("status-label"),
+  filterInput:  document.getElementById("filter-input"),
+  gameList:     document.getElementById("game-list"),
+  gameTitle:    document.getElementById("game-title"),
+  gameSubtitle: document.getElementById("game-subtitle"),
+  board:        document.getElementById("board"),
+  rankLabels:   document.getElementById("rank-labels"),
+  fileLabels:   document.getElementById("file-labels"),
+  playerTop:    document.getElementById("player-top"),
+  playerBottom: document.getElementById("player-bottom"),
+  btnStart:     document.getElementById("btn-start"),
+  btnPrev:      document.getElementById("btn-prev"),
+  btnNext:      document.getElementById("btn-next"),
+  btnEnd:       document.getElementById("btn-end"),
+  plyInd:       document.getElementById("ply-indicator"),
+  moveList:     document.getElementById("move-list"),
+};
+
+function buildBoardSquares() {
+  // Lay out the squares according to the current orientation.
+  // White-at-bottom: ranks render top→bottom 8..1, files left→right a..h.
+  // Black-at-bottom: ranks render top→bottom 1..8, files left→right h..a.
+  const whiteBottom = state.orientation === "w";
+  const ranks = whiteBottom ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
+  const files = whiteBottom ? [0, 1, 2, 3, 4, 5, 6, 7] : [7, 6, 5, 4, 3, 2, 1, 0];
+
+  els.board.innerHTML = "";
+  for (const r of ranks) {
+    for (const f of files) {
+      const cell = document.createElement("div");
+      cell.className = "sq " + (((f + r) % 2 === 0) ? "dark" : "light");
+      cell.dataset.idx = sq(f, r);
+      els.board.appendChild(cell);
+    }
+  }
+
+  els.rankLabels.innerHTML = "";
+  for (const r of ranks) {
+    const span = document.createElement("span");
+    span.textContent = r + 1;
+    els.rankLabels.appendChild(span);
+  }
+
+  els.fileLabels.innerHTML = "";
+  for (const f of files) {
+    const span = document.createElement("span");
+    span.textContent = FILES[f];
+    els.fileLabels.appendChild(span);
+  }
+}
+
+function setOrientation(o) {
+  if (o !== "w" && o !== "b") o = "w";
+  if (state.orientation === o) return;
+  state.orientation = o;
+  buildBoardSquares();
+}
+
+// ---- Player bars / captures -----------------------------------------
+//
+// Standard starting piece counts and material values used to display
+// the captured pieces and the material balance under each player.
+const START_COUNTS = { P: 8, N: 2, B: 2, R: 2, Q: 1, K: 1 };
+const PIECE_VALUE  = { P: 1, N: 3, B: 3, R: 5, Q: 9, K: 0 };
+// Order in which to render captured pieces (most valuable first).
+const CAPTURE_ORDER = ["Q", "R", "B", "N", "P"];
+
+function countPieces(board) {
+  // Returns { w: {P,N,B,R,Q,K}, b: {...} }
+  const w = { P: 0, N: 0, B: 0, R: 0, Q: 0, K: 0 };
+  const b = { P: 0, N: 0, B: 0, R: 0, Q: 0, K: 0 };
+  for (const p of board) {
+    if (!p) continue;
+    if (isWhite(p)) w[p]++;
+    else            b[p.toUpperCase()]++;
+  }
+  return { w, b };
+}
+
+function computeCaptures(pos) {
+  // Returns the pieces *missing* compared to the starting position,
+  // grouped by colour of the captured piece.
+  const counts = countPieces(pos.board);
+  const missing = { w: {}, b: {} };
+  let materialW = 0, materialB = 0;
+  for (const t of CAPTURE_ORDER) {
+    const lostW = Math.max(0, START_COUNTS[t] - counts.w[t]);
+    const lostB = Math.max(0, START_COUNTS[t] - counts.b[t]);
+    if (lostW) missing.w[t] = lostW;
+    if (lostB) missing.b[t] = lostB;
+    materialW += counts.w[t] * PIECE_VALUE[t];
+    materialB += counts.b[t] * PIECE_VALUE[t];
+  }
+  return { missing, advantage: materialW - materialB };
+}
+
+function renderCaptureGlyphs(targetEl, color, missingForColor) {
+  // Draws the captured pieces of `color` (i.e. pieces that the player
+  // of opposite colour took). `missingForColor` is { P:n, N:n, ... }.
+  targetEl.innerHTML = "";
+  for (const t of CAPTURE_ORDER) {
+    const n = missingForColor[t] || 0;
+    for (let i = 0; i < n; i++) {
+      const span = document.createElement("span");
+      const piece = color === "w" ? t : t.toLowerCase();
+      span.textContent = PIECE_GLYPHS[piece];
+      span.className = color === "w" ? "piece-w" : "piece-b";
+      targetEl.appendChild(span);
+    }
+  }
+}
+
+function playerInfo(g, color) {
+  const side = color === "w" ? g.white : g.black;
+  return {
+    name: side?.username || "?",
+    rating: side?.rating ?? null,
+    result: side?.result || null,
+  };
+}
+
+function resultClass(result) {
+  // chess.com uses many strings; bucket them coarsely.
+  if (!result) return "";
+  if (result === "win") return "win";
+  if (["agreed", "stalemate", "repetition", "insufficient",
+       "50move", "timevsinsufficient"].includes(result)) return "draw";
+  return "loss";
+}
+
+function resultText(result) {
+  if (!result) return "";
+  if (result === "win") return "1";
+  if (resultClass(result) === "draw") return "½";
+  return "0";
+}
+
+function fillStaticPlayerBar(barEl, info) {
+  barEl.querySelector(".name").textContent = info.name;
+  const rating = barEl.querySelector(".rating");
+  rating.textContent = info.rating != null ? `(${info.rating})` : "";
+  const badge = barEl.querySelector(".result-badge");
+  const cls = resultClass(info.result);
+  const text = resultText(info.result);
+  badge.className = "result-badge" + (cls ? " " + cls : "");
+  badge.textContent = text;
+  badge.hidden = !text;
+}
+
+function renderPlayerBars() {
+  const game = state.games[state.selectedGameIdx];
+  if (!game) {
+    for (const bar of [els.playerTop, els.playerBottom]) {
+      bar.querySelector(".name").textContent = "—";
+      bar.querySelector(".rating").textContent = "";
+      bar.querySelector(".result-badge").textContent = "";
+      bar.querySelector(".result-badge").className = "result-badge";
+      bar.querySelector(".captures").innerHTML = "";
+      bar.querySelector(".material").textContent = "";
+    }
+    return;
+  }
+
+  // Map player bar position -> color, based on board orientation.
+  const bottomColor = state.orientation; // "w" or "b"
+  const topColor    = bottomColor === "w" ? "b" : "w";
+
+  fillStaticPlayerBar(els.playerTop,    playerInfo(game, topColor));
+  fillStaticPlayerBar(els.playerBottom, playerInfo(game, bottomColor));
+
+  const { missing, advantage } = computeCaptures(state.positions[state.ply]);
+  // Captures shown next to a player are pieces of the *opposite* colour.
+  renderCaptureGlyphs(els.playerTop.querySelector(".captures"),
+                      bottomColor, missing[bottomColor]);
+  renderCaptureGlyphs(els.playerBottom.querySelector(".captures"),
+                      topColor,    missing[topColor]);
+
+  // Material advantage: positive = white ahead.
+  const advTop = topColor === "w" ? advantage : -advantage;
+  const advBot = -advTop;
+  els.playerTop.querySelector(".material")
+    .textContent = advTop > 0 ? "+" + advTop : "";
+  els.playerBottom.querySelector(".material")
+    .textContent = advBot > 0 ? "+" + advBot : "";
+}
+
+function renderBoard(pos) {
+  const cells = els.board.children;
+  for (const cell of cells) {
+    const idx = parseInt(cell.dataset.idx, 10);
+    const piece = pos.board[idx];
+    cell.classList.remove("hi");
+    cell.textContent = "";
+    if (piece) {
+      const span = document.createElement("span");
+      span.textContent = PIECE_GLYPHS[piece];
+      span.className = isWhite(piece) ? "piece-w" : "piece-b";
+      cell.appendChild(span);
+    }
+  }
+  if (pos.lastMove) {
+    const fromCell = els.board.querySelector(`[data-idx="${pos.lastMove.from}"]`);
+    const toCell   = els.board.querySelector(`[data-idx="${pos.lastMove.to}"]`);
+    fromCell?.classList.add("hi");
+    toCell?.classList.add("hi");
+  }
+}
+
+function renderMoveList() {
+  els.moveList.innerHTML = "";
+  const total = state.sanList.length;
+  for (let i = 0; i < total; i += 2) {
+    const num = document.createElement("div");
+    num.className = "num";
+    num.textContent = (i / 2 + 1) + ".";
+    els.moveList.appendChild(num);
+
+    for (const offset of [0, 1]) {
+      const ply = i + offset;
+      const span = document.createElement("div");
+      span.className = "ply";
+      if (ply < total) {
+        span.textContent = state.sanList[ply];
+        span.dataset.ply = ply + 1; // positions index after this move
+        span.addEventListener("click", () => setPly(ply + 1));
+      } else {
+        span.textContent = "";
+      }
+      els.moveList.appendChild(span);
+    }
+  }
+  highlightActivePly();
+}
+
+function highlightActivePly() {
+  for (const el of els.moveList.querySelectorAll(".ply")) {
+    el.classList.toggle("active", parseInt(el.dataset.ply, 10) === state.ply);
+  }
+  const active = els.moveList.querySelector(".ply.active");
+  active?.scrollIntoView({ block: "nearest" });
+}
+
+function setPly(p) {
+  state.ply = Math.max(0, Math.min(state.positions.length - 1, p));
+  renderBoard(state.positions[state.ply]);
+  els.plyInd.textContent = `${state.ply} / ${state.positions.length - 1}`;
+  els.btnStart.disabled = els.btnPrev.disabled = state.ply === 0;
+  els.btnEnd.disabled   = els.btnNext.disabled = state.ply === state.positions.length - 1;
+  highlightActivePly();
+  renderPlayerBars();
+}
+
+// ---- Game list -------------------------------------------------------
+function gameLabel(g) {
+  const w = g.white?.username ?? "?";
+  const b = g.black?.username ?? "?";
+  const wr = g.white?.rating ? ` (${g.white.rating})` : "";
+  const br = g.black?.rating ? ` (${g.black.rating})` : "";
+  return { players: `${w}${wr} vs ${b}${br}`, game: g };
+}
+
+function resultBadge(g) {
+  // From the perspective of the queried user, if known.
+  const me = state.username;
+  if (!me) return "";
+  let myResult, oppResult;
+  if (g.white?.username?.toLowerCase() === me) {
+    myResult = g.white?.result; oppResult = g.black?.result;
+  } else if (g.black?.username?.toLowerCase() === me) {
+    myResult = g.black?.result; oppResult = g.white?.result;
+  } else {
+    return "";
+  }
+  if (myResult === "win") return { cls: "result-W", text: "W" };
+  if (oppResult === "win") return { cls: "result-L", text: "L" };
+  return { cls: "result-D", text: "D" };
+}
+
+function fmtTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+function renderGameList() {
+  els.gameList.innerHTML = "";
+  const filter = els.filterInput.value.trim().toLowerCase();
+  state.filteredIndices = [];
+
+  state.games.forEach((g, idx) => {
+    const label = gameLabel(g).players.toLowerCase();
+    const tc = (g.time_class ?? "") + " " + (g.time_control ?? "");
+    if (filter && !label.includes(filter) && !tc.toLowerCase().includes(filter)) return;
+    state.filteredIndices.push(idx);
+
+    const li = document.createElement("li");
+    li.dataset.idx = idx;
+
+    const players = document.createElement("div");
+    players.className = "players";
+    players.textContent = gameLabel(g).players;
+    li.appendChild(players);
+
+    const badge = resultBadge(g);
+    if (badge) {
+      const span = document.createElement("div");
+      span.className = badge.cls;
+      span.textContent = badge.text;
+      li.appendChild(span);
+    }
+
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = [g.time_class, g.time_control, fmtTime(g.end_time)]
+      .filter(Boolean)
+      .join(" • ");
+    li.appendChild(sub);
+
+    li.addEventListener("click", () => selectGame(idx));
+    if (idx === state.selectedGameIdx) li.classList.add("active");
+    els.gameList.appendChild(li);
+  });
+}
+
+function selectGame(idx) {
+  state.selectedGameIdx = idx;
+  const g = state.games[idx];
+  if (!g) return;
+
+  const { positions, sanList } = replayPgn(g.pgn || "");
+  state.positions = positions;
+  state.sanList = sanList;
+  state.ply = 0;
+
+  // Orient the board so the queried player is always at the bottom.
+  // Falls back to white-at-bottom if no username is set or if the
+  // queried user isn't a participant of this game.
+  const me = state.username;
+  const blackName = g.black?.username?.toLowerCase();
+  setOrientation(me && me === blackName ? "b" : "w");
+
+  els.gameTitle.textContent = [g.time_class, g.time_control, fmtTime(g.end_time)]
+    .filter(Boolean).join(" • ") || "Game";
+  els.gameSubtitle.textContent = "";
+  if (g.url) {
+    const a = document.createElement("a");
+    a.href = g.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = g.url;
+    els.gameSubtitle.appendChild(document.createTextNode("↗ "));
+    els.gameSubtitle.appendChild(a);
+  }
+
+  renderMoveList();
+  setPly(0);
+
+  for (const li of els.gameList.children) {
+    li.classList.toggle("active", parseInt(li.dataset.idx, 10) === idx);
+  }
+}
+
+// ---- Loading ---------------------------------------------------------
+//
+// chess.com's public API supports CORS, so we can fetch directly from
+// the browser. For each user we GET
+//   https://api.chess.com/pub/player/<user>/games/archives
+// and then walk every monthly archive, concatenating their `games`
+// arrays.
+
+const API_BASE = "https://api.chess.com/pub/player";
+let activeLoad = null; // { controller: AbortController }
+
+function setStatus(text, isError = false) {
+  els.statusLabel.textContent = text;
+  els.statusLabel.classList.toggle("error", !!isError);
+}
+
+function setLoading(loading) {
+  els.loadBtn.disabled = loading;
+  els.usernameIn.disabled = loading;
+  els.cancelBtn.hidden = !loading;
+}
+
+function slimGame(g) {
+  const w = g.white || {}, b = g.black || {};
+  return {
+    url: g.url,
+    pgn: g.pgn || "",
+    time_class: g.time_class,
+    time_control: g.time_control,
+    rated: g.rated,
+    rules: g.rules,
+    end_time: g.end_time,
+    white: { username: w.username, rating: w.rating, result: w.result },
+    black: { username: b.username, rating: b.rating, result: b.result },
+  };
+}
+
+async function loadFromChessCom(username) {
+  if (activeLoad) activeLoad.controller.abort();
+  const controller = new AbortController();
+  activeLoad = { controller };
+  setLoading(true);
+
+  // Reset current state
+  state.username = username;
+  state.games = [];
+  state.selectedGameIdx = -1;
+  renderGameList();
+  els.gameTitle.textContent = "Select a game";
+  els.gameSubtitle.textContent = "";
+  state.positions = [initialPosition()];
+  state.sanList = [];
+  setPly(0);
+  renderMoveList();
+
+  try {
+    setStatus(`Fetching archive list for "${username}"...`);
+    const archivesResp = await fetch(
+      `${API_BASE}/${encodeURIComponent(username)}/games/archives`,
+      { signal: controller.signal, cache: "no-store" }
+    );
+    if (archivesResp.status === 404) {
+      throw new Error(`User "${username}" not found on chess.com`);
+    }
+    if (!archivesResp.ok) {
+      throw new Error(`HTTP ${archivesResp.status} fetching archives`);
+    }
+    const { archives = [] } = await archivesResp.json();
+
+    if (!archives.length) {
+      setStatus(`No public games for "${username}".`);
+      setLoading(false);
+      activeLoad = null;
+      return;
+    }
+
+    const all = [];
+    for (let i = 0; i < archives.length; i++) {
+      setStatus(`Loading archive ${i + 1} / ${archives.length}...`);
+      const r = await fetch(archives[i], {
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!r.ok) {
+        console.warn("Skipping archive", archives[i], "HTTP", r.status);
+        continue;
+      }
+      const data = await r.json();
+      for (const g of data.games || []) all.push(slimGame(g));
+
+      // Render incrementally so the user sees games appear.
+      state.games = all.slice().sort((a, b) => (b.end_time || 0) - (a.end_time || 0));
+      renderGameList();
+    }
+
+    setStatus(`Loaded ${state.games.length} games for ${username}.`);
+    if (state.games.length) selectGame(0);
+  } catch (err) {
+    if (err.name === "AbortError") {
+      setStatus("Cancelled.");
+    } else {
+      console.error(err);
+      setStatus(err.message || "Failed to load games.", true);
+    }
+  } finally {
+    setLoading(false);
+    activeLoad = null;
+  }
+}
+
+/** Optional: load a pre-downloaded games.json (produced by
+ *  download_games.py) if it's served alongside index.html. Used as a
+ *  silent offline fallback on initial page load. */
+async function tryLoadLocalGamesJson() {
+  try {
+    const resp = await fetch("games.json", { cache: "no-store" });
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    if (!data.games?.length) return false;
+    state.username = (data.username || "").toLowerCase() || null;
+    state.games = (data.games || [])
+      .slice()
+      .sort((a, b) => (b.end_time || 0) - (a.end_time || 0));
+    if (state.username) els.usernameIn.value = state.username;
+    setStatus(`Loaded ${state.games.length} cached games from games.json.`);
+    renderGameList();
+    if (state.games.length) selectGame(0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---- Wire-up ---------------------------------------------------------
+function init() {
+  buildBoardSquares();
+  renderBoard(initialPosition());
+
+  els.btnStart.addEventListener("click", () => setPly(0));
+  els.btnPrev .addEventListener("click", () => setPly(state.ply - 1));
+  els.btnNext .addEventListener("click", () => setPly(state.ply + 1));
+  els.btnEnd  .addEventListener("click", () => setPly(state.positions.length - 1));
+  els.filterInput.addEventListener("input", renderGameList);
+
+  els.form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const username = els.usernameIn.value.trim().toLowerCase();
+    if (!username) return;
+    loadFromChessCom(username);
+  });
+  els.cancelBtn.addEventListener("click", () => {
+    if (activeLoad) activeLoad.controller.abort();
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.tagName === "INPUT") return;
+    if      (ev.key === "ArrowLeft")  { setPly(state.ply - 1); ev.preventDefault(); }
+    else if (ev.key === "ArrowRight") { setPly(state.ply + 1); ev.preventDefault(); }
+    else if (ev.key === "Home")       { setPly(0); ev.preventDefault(); }
+    else if (ev.key === "End")        { setPly(state.positions.length - 1); ev.preventDefault(); }
+  });
+
+  // Pre-fill from URL: ?user=<name> auto-loads on page open.
+  const params = new URLSearchParams(window.location.search);
+  const urlUser = (params.get("user") || "").trim().toLowerCase();
+  if (urlUser) {
+    els.usernameIn.value = urlUser;
+    loadFromChessCom(urlUser);
+    return;
+  }
+
+  // Otherwise quietly try a pre-downloaded games.json; if missing, just
+  // sit at the empty state and wait for the user to enter a name.
+  tryLoadLocalGamesJson().then((loaded) => {
+    if (!loaded) setStatus("Enter a chess.com username and press Load.");
+  });
+}
+
+document.addEventListener("DOMContentLoaded", init);

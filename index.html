@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chess.com analyzer</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>chess.com analyzer</h1>
+      <form id="load-form">
+        <input
+          id="username-input"
+          type="text"
+          placeholder="chess.com username"
+          autocomplete="off"
+          spellcheck="false"
+          required
+        />
+        <button id="load-btn" type="submit">Load games</button>
+        <button id="cancel-btn" type="button" hidden>Cancel</button>
+        <span id="status-label"></span>
+      </form>
+    </header>
+
+    <main>
+      <aside id="game-list-pane">
+        <div class="filter-row">
+          <input id="filter-input" type="search" placeholder="Filter by opponent / time class..." />
+        </div>
+        <ol id="game-list" aria-label="Games"></ol>
+      </aside>
+
+      <section id="board-pane">
+        <div id="game-header">
+          <h2 id="game-title">Select a game</h2>
+          <p id="game-subtitle"></p>
+        </div>
+
+        <div id="board-and-moves">
+          <div id="board-column">
+            <div id="player-top" class="player-bar">
+              <span class="name">—</span>
+              <span class="rating"></span>
+              <span class="result-badge"></span>
+              <span class="captures" aria-label="captured pieces"></span>
+              <span class="material" title="material advantage"></span>
+            </div>
+
+            <div id="board-wrapper">
+              <div id="rank-labels" class="axis-labels"></div>
+              <div id="board" role="grid" aria-label="Chess board"></div>
+              <div id="file-labels" class="axis-labels"></div>
+            </div>
+
+            <div id="player-bottom" class="player-bar">
+              <span class="name">—</span>
+              <span class="rating"></span>
+              <span class="result-badge"></span>
+              <span class="captures" aria-label="captured pieces"></span>
+              <span class="material" title="material advantage"></span>
+            </div>
+
+            <div id="controls">
+              <button id="btn-start"  type="button" title="Start (Home)">⏮</button>
+              <button id="btn-prev"   type="button" title="Previous (←)">◀</button>
+              <button id="btn-next"   type="button" title="Next (→)">▶</button>
+              <button id="btn-end"    type="button" title="End (End)">⏭</button>
+              <span id="ply-indicator">0 / 0</span>
+            </div>
+          </div>
+
+          <ol id="move-list" aria-label="Moves"></ol>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
