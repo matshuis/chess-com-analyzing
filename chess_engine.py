@@ -499,3 +499,37 @@ def _swap_side(pos: Position) -> Position:
     swapped = pos.clone()
     swapped.stm = "b" if pos.stm == "w" else "w"
     return swapped
+
+
+# ---------------------------------------------------------------------------
+#  Checkmate detection
+# ---------------------------------------------------------------------------
+
+def in_check(pos: Position) -> bool:
+    """Is the side-to-move's king currently attacked?"""
+    white = pos.stm == "w"
+    ksq = find_king(pos.board, white)
+    if ksq < 0:
+        return False
+    return is_attacked_by(pos.board, ksq, by_white=not white)
+
+
+def is_checkmate(pos: Position) -> bool:
+    """True if the side-to-move is in check and has no legal moves."""
+    return in_check(pos) and not legal_moves(pos)
+
+
+def find_mate_in_one(pos: Position) -> list:
+    """Every legal move for `pos.stm` that delivers immediate checkmate."""
+    return [m for m in legal_moves(pos) if is_checkmate(make_move(pos, m))]
+
+
+def allows_mate_in_one(pos: Position, move: Move) -> list:
+    """The opponent's mate-in-one replies that `move` creates.
+
+    Returns the list of mating moves the opponent gains by us playing
+    `move`. Empty list ⇒ the move is safe from mate-in-one. Mirrors
+    :func:`is_blunder` but for mate threats instead of forks.
+    """
+    after = make_move(pos, move)
+    return find_mate_in_one(after)

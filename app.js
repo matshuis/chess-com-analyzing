@@ -583,6 +583,73 @@ function describeFork(fork) {
   return `${attackerName} ${from}→${to} attacks ${tgts}`;
 }
 
+// ---- Mate detection -------------------------------------------------
+//
+// Mirrors the Python helpers in chess_engine.py. We need three things
+// for the UI:
+//   * `inCheck(pos)`         — is `pos.sideToMove`'s king attacked?
+//   * `findMateInOne(pos)`   — every move for `pos.sideToMove` that
+//                              checkmates the opponent.
+//   * `allowsMateInOne(pos, m)` — opponent's mate-in-one replies that
+//                                 `m` permits. Empty ⇒ safe.
+
+function inCheck(pos) {
+  const white = pos.sideToMove === "w";
+  const ksq = findKing(pos.board, white);
+  if (ksq < 0) return false;
+  return isSquareAttackedBy(pos.board, ksq, !white);
+}
+
+function isCheckmate(pos) {
+  return inCheck(pos) && legalMoves(pos).length === 0;
+}
+
+function findMateInOne(pos) {
+  const out = [];
+  for (const mv of legalMoves(pos)) {
+    const next = applyMove(pos, sanMoveFor(pos, mv));
+    if (isCheckmate(next)) out.push(mv);
+  }
+  return out;
+}
+
+/** Convert a {from,to,promotion} move from `legalMoves` into the
+ *  SAN-shaped object that `applyMove` expects. */
+function sanMoveFor(pos, mv) {
+  const piece = pos.board[mv.from];
+  const pt = piece.toUpperCase();
+  // Castling (king moving two files).
+  if (pt === "K" && Math.abs(fileOf(mv.to) - fileOf(mv.from)) === 2) {
+    return {
+      castle: fileOf(mv.to) === 6 ? "K" : "Q",
+      piece: "K", fromFile: -1, fromRank: -1, to: -1,
+      capture: false, promotion: null, check: false, mate: false,
+      san: fileOf(mv.to) === 6 ? "O-O" : "O-O-O",
+    };
+  }
+  const capture = !!pos.board[mv.to] ||
+    (pt === "P" && fileOf(mv.from) !== fileOf(mv.to) && mv.to === pos.epTarget);
+  return {
+    castle: null,
+    piece: pt,
+    fromFile: fileOf(mv.from),
+    fromRank: rankOf(mv.from),
+    to: mv.to,
+    capture,
+    promotion: mv.promotion || null,
+    check: false, mate: false,
+    san: `${pt}${sqName(mv.to)}`,
+  };
+}
+
+function describeMate(mv, pos) {
+  // `pos` is the board *before* the mating move was played, so we can
+  // still see the moving piece on its origin square.
+  const piece = pos?.board?.[mv.from];
+  const pieceWord = piece ? pieceName(piece) : "piece";
+  return `${pieceWord} ${sqName(mv.from)}→${sqName(mv.to)}#`;
+}
+
 // =====================================================================
 //  Game replay
 // =====================================================================
@@ -609,14 +676,25 @@ function replayPgn(pgn) {
   }
 
   // Annotate moves:
-  //   * blunders[i]  — non-null if the move that produced positions[i]
-  //                    allowed the opponent a fresh fork (a fork that
-  //                    wasn't already on the board before the move).
-  //   * goodMoves[i] — non-null if the move that produced positions[i]
-  //                    *is itself* a winning fork the side-to-move
-  //                    had available in positions[i-1].
-  const blunders  = new Array(positions.length).fill(null);
-  const goodMoves = new Array(positions.length).fill(null);
+  //   * blunders[i]       — non-null if the move that produced
+  //                         positions[i] allowed the opponent a fresh
+  //                         fork (a fork that wasn't already on the
+  //                         board before the move).
+  //   * goodMoves[i]      — non-null if the move that produced
+  //                         positions[i] *is itself* a winning fork
+  //                         the side-to-move had available before.
+  //   * matesAllowed[i]   — non-null if the move that produced
+  //                         positions[i] left the opponent with at
+  //                         least one mate-in-one reply (and there
+  //                         was *no* mate-in-one threat one ply
+  //                         earlier — i.e. the move is what created
+  //                         the threat, or failed to escape it).
+  //   * matesDelivered[i] — non-null if the move that produced
+  //                         positions[i] is itself checkmate.
+  const blunders       = new Array(positions.length).fill(null);
+  const goodMoves      = new Array(positions.length).fill(null);
+  const matesAllowed   = new Array(positions.length).fill(null);
+  const matesDelivered = new Array(positions.length).fill(null);
   let prevForks = findForks(positions[0]);
   for (let i = 1; i < positions.length; i++) {
     // Was the move just played one of the forks that were available?
@@ -639,9 +717,18 @@ function replayPgn(pgn) {
       if (fresh.length) blunders[i] = fresh;
     }
     prevForks = here;
+
+    // Mate annotations.
+    if (isCheckmate(positions[i])) {
+      // The move just played delivered checkmate.
+      matesDelivered[i] = { from: played.from, to: played.to };
+    } else {
+      const mates = findMateInOne(positions[i]);
+      if (mates.length) matesAllowed[i] = mates;
+    }
   }
 
-  return { positions, sanList, blunders, goodMoves };
+  return { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered };
 }
 
 // =====================================================================
@@ -657,6 +744,8 @@ const state = {
   sanList: [],
   blunders: [],
   goodMoves: [],
+  matesAllowed: [],
+  matesDelivered: [],
   ply: 0, // index into positions
   orientation: "w", // "w" = white at the bottom, "b" = black at the bottom
 };
@@ -895,13 +984,29 @@ function renderMoveList() {
       span.className = "ply";
       if (ply < total) {
         const positionIdx = ply + 1; // positions index after this move
-        const blunder = state.blunders[positionIdx];
-        const good    = state.goodMoves[positionIdx];
+        const blunder       = state.blunders[positionIdx];
+        const good          = state.goodMoves[positionIdx];
+        const mateAllowed   = state.matesAllowed?.[positionIdx];
+        const mateDelivered = state.matesDelivered?.[positionIdx];
         let label = state.sanList[ply];
-        // Blunder takes precedence — the long-term cost outweighs the
-        // immediate gain — but in practice the two are mutually
-        // exclusive (you don't usually hand over a fork while making one).
-        if (blunder) {
+        // Precedence (most important first):
+        //   1. mateDelivered — game-ending, definitely shown.
+        //   2. mateAllowed   — usually losing, overrides fork blunder.
+        //   3. blunder (fork)
+        //   4. good (executed fork)
+        if (mateDelivered) {
+          // Avoid double-#; some sanList entries already carry it.
+          if (!label.endsWith("#")) label += "#";
+          span.classList.add("good");
+          span.title = "Checkmate";
+        } else if (mateAllowed) {
+          label += "??";
+          span.classList.add("blunder");
+          const detail = mateAllowed
+            .map((m) => describeMate(m, state.positions[positionIdx]))
+            .join("; ");
+          span.title = "Allows mate-in-one: " + detail;
+        } else if (blunder) {
           label += "??";
           span.classList.add("blunder");
           span.title = "Allows fork: "
@@ -956,9 +1061,22 @@ function renderMoveFeedback() {
   if (idx <= 0) { fb.hidden = true; return; }
   const san = state.sanList[idx - 1];
   const spoken = spokenSan(san);
-  const blunder = state.blunders[idx];
-  const good    = state.goodMoves[idx];
-  if (blunder) {
+  const blunder       = state.blunders[idx];
+  const good          = state.goodMoves[idx];
+  const mateAllowed   = state.matesAllowed?.[idx];
+  const mateDelivered = state.matesDelivered?.[idx];
+  if (mateDelivered) {
+    fb.hidden = false;
+    fb.classList.add("good");
+    fb.textContent = `★ ${spoken} — checkmate!`;
+  } else if (mateAllowed) {
+    fb.hidden = false;
+    fb.classList.add("blunder");
+    const detail = mateAllowed
+      .map((m) => describeMate(m, state.positions[idx]))
+      .join("; ");
+    fb.textContent = `⚠ ${spoken} (??) — allows mate-in-one: ${detail}`;
+  } else if (blunder) {
     fb.hidden = false;
     fb.classList.add("blunder");
     const detail = blunder.map(describeFork).join("; ");
@@ -1027,9 +1145,13 @@ function svgEl(name, attrs = {}) {
   return el;
 }
 
-/** Draw arrows from the forking piece's square to each of its targets.
- *  Blunders (the opponent now has a fork) draw in the "loss" colour;
- *  the player's own executed fork (good move) draws in the "win" colour. */
+/** Draw arrows for whatever annotation lives on the current ply:
+ *  - Allowed mate-in-one (red): one from→to arrow per mating move.
+ *  - Fork blunder (red): dashed from→to plus solid arrows to each target.
+ *  - Executed fork (green): solid arrows to each target.
+ *  Mate that was actually delivered is *not* drawn — the last-move
+ *  highlight already shows it, and the king is mated where it stands.
+ */
 function renderForkArrows() {
   const svg = els.boardOverlay;
   if (!svg) return;
@@ -1037,12 +1159,29 @@ function renderForkArrows() {
 
   const idx = state.ply;
   if (idx <= 0) return;
-  const blunder = state.blunders[idx];
-  const good    = state.goodMoves[idx];
-  let sets = [];
-  if (blunder)   sets = blunder.map((f) => ({ fork: f, cls: "blunder" }));
-  else if (good) sets = [{ fork: good, cls: "good" }];
-  if (!sets.length) return;
+  const blunder       = state.blunders[idx];
+  const good          = state.goodMoves[idx];
+  const mateAllowed   = state.matesAllowed?.[idx];
+  const mateDelivered = state.matesDelivered?.[idx];
+
+  // Build a list of "shapes" to draw. Each shape has a colour class
+  // ("blunder" / "good") and either:
+  //   * a `fork` with `.move.{from,to}` + `.targets[]`, or
+  //   * a `mate` with `.move.{from,to}` (no targets).
+  const shapes = [];
+  if (mateDelivered) {
+    // Don't draw anything for delivered mate — too late to learn from
+    // arrows and the last-move highlight already makes it obvious.
+  } else if (mateAllowed) {
+    for (const m of mateAllowed) {
+      shapes.push({ kind: "mate", move: m, cls: "blunder" });
+    }
+  } else if (blunder) {
+    for (const f of blunder) shapes.push({ kind: "fork", fork: f, cls: "blunder" });
+  } else if (good) {
+    shapes.push({ kind: "fork", fork: good, cls: "good" });
+  }
+  if (!shapes.length) return;
 
   // One arrowhead marker per colour, referenced by id from <line>.
   // Use userSpaceOnUse so the arrowhead size is in board-square units
@@ -1064,12 +1203,6 @@ function renderForkArrows() {
   }
   svg.appendChild(defs);
 
-  // For a blunder the attacker isn't actually on the board yet — it's
-  // still on `fork.move.from` and will arrive at `fork.move.to`. Drawing
-  // the arrow from the future destination is most informative for the
-  // *targets* but hides where the threat comes from, so we draw both:
-  //   * a dashed move arrow from .from -> .to
-  //   * solid threat arrows from .to -> each target
   const whiteBottom = state.orientation === "w";
   const center = (square) => {
     const f = fileOf(square), r = rankOf(square);
@@ -1084,9 +1217,27 @@ function renderForkArrows() {
     return { x: b.x - (dx / len) * by, y: b.y - (dy / len) * by };
   };
 
-  for (const { fork, cls } of sets) {
-    const fromC = center(fork.move.from);
-    const toC   = center(fork.move.to);
+  for (const shape of shapes) {
+    const cls = shape.cls;
+
+    if (shape.kind === "mate") {
+      // Single solid arrow showing where the opponent will mate from.
+      const fromC = center(shape.move.from);
+      const toC   = center(shape.move.to);
+      const tip   = shorten(fromC, toC, 0.32);
+      const line  = svgEl("line", {
+        x1: fromC.x, y1: fromC.y, x2: tip.x, y2: tip.y,
+        "stroke-width": "0.13",
+        "marker-end": `url(#fa-head-${cls})`,
+      });
+      line.setAttribute("class", `fork-arrow-${cls}`);
+      svg.appendChild(line);
+      continue;
+    }
+
+    // Fork shape — same logic as before.
+    const fromC = center(shape.fork.move.from);
+    const toC   = center(shape.fork.move.to);
 
     // Dashed "move" arrow only when the move hasn't been played yet
     // (blunders). For executed forks, the last-move highlight already
@@ -1105,7 +1256,7 @@ function renderForkArrows() {
       svg.appendChild(mv);
     }
 
-    for (const t of fork.targets) {
+    for (const t of shape.fork.targets) {
       const targetC = center(t.square);
       const tip = shorten(toC, targetC, 0.32);
       const line = svgEl("line", {
@@ -1196,11 +1347,14 @@ function selectGame(idx) {
   const g = state.games[idx];
   if (!g) return;
 
-  const { positions, sanList, blunders, goodMoves } = replayPgn(g.pgn || "");
+  const { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered }
+    = replayPgn(g.pgn || "");
   state.positions = positions;
   state.sanList = sanList;
   state.blunders = blunders;
   state.goodMoves = goodMoves;
+  state.matesAllowed = matesAllowed;
+  state.matesDelivered = matesDelivered;
   state.ply = 0;
 
   // Orient the board so the queried player is always at the bottom.
@@ -1473,16 +1627,26 @@ function makeUserMove(from, to, promotion) {
     (f) => !prevKeys.has(`${f.move.from}-${f.move.to}`)
   );
 
+  // Mate annotations: did we deliver mate, or hand the opponent one?
+  const delivered = isCheckmate(next)
+    ? { from, to }
+    : null;
+  const allowed = delivered ? null : findMateInOne(next);
+
   // Truncate any forward history before appending.
-  state.positions = state.positions.slice(0, state.ply + 1);
-  state.sanList   = state.sanList.slice(0, state.ply);
-  state.blunders  = state.blunders.slice(0, state.ply + 1);
-  state.goodMoves = state.goodMoves.slice(0, state.ply + 1);
+  state.positions      = state.positions.slice(0, state.ply + 1);
+  state.sanList        = state.sanList.slice(0, state.ply);
+  state.blunders       = state.blunders.slice(0, state.ply + 1);
+  state.goodMoves      = state.goodMoves.slice(0, state.ply + 1);
+  state.matesAllowed   = state.matesAllowed.slice(0, state.ply + 1);
+  state.matesDelivered = state.matesDelivered.slice(0, state.ply + 1);
 
   state.positions.push(next);
-  state.sanList.push(moveObj.san);
+  state.sanList.push(moveObj.san + (delivered ? "#" : ""));
   state.blunders.push(fresh.length ? fresh : null);
   state.goodMoves.push(executed || null);
+  state.matesAllowed.push(allowed && allowed.length ? allowed : null);
+  state.matesDelivered.push(delivered);
 
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
@@ -1564,6 +1728,8 @@ function resetFreePlay() {
   state.sanList = [];
   state.blunders = [null];
   state.goodMoves = [null];
+  state.matesAllowed = [null];
+  state.matesDelivered = [null];
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
   renderMoveList();
@@ -1587,6 +1753,8 @@ function init() {
   // out of the box before the user has made any moves.
   state.blunders = [null];
   state.goodMoves = [null];
+  state.matesAllowed = [null];
+  state.matesDelivered = [null];
   setPly(0);
   updateFreePlayChrome();
 
