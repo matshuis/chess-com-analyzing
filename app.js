@@ -681,6 +681,8 @@ const els = {
   btnPrev:      document.getElementById("btn-prev"),
   btnNext:      document.getElementById("btn-next"),
   btnEnd:       document.getElementById("btn-end"),
+  btnFlip:      document.getElementById("btn-flip"),
+  btnReset:     document.getElementById("btn-reset"),
   plyInd:       document.getElementById("ply-indicator"),
   moveList:     document.getElementById("move-list"),
   feedback:     document.getElementById("move-feedback"),
@@ -939,6 +941,10 @@ function setPly(p) {
   renderPlayerBars();
   renderMoveFeedback();
   renderForkArrows();
+  // Selecting a different ply clears any in-progress move pickup.
+  freePlay.selected = -1;
+  freePlay.legalForSelected = [];
+  renderSelection();
 }
 
 function renderMoveFeedback() {
@@ -1223,6 +1229,7 @@ function selectGame(idx) {
   for (const li of els.gameList.children) {
     li.classList.toggle("active", parseInt(li.dataset.idx, 10) === idx);
   }
+  updateFreePlayChrome();
 }
 
 // ---- Loading ---------------------------------------------------------
@@ -1358,15 +1365,241 @@ async function tryLoadLocalGamesJson() {
   }
 }
 
+// =====================================================================
+//  Free-play mode (no chess.com game loaded)
+// =====================================================================
+//
+// When no game is selected, the user can play moves for both sides by
+// clicking a piece and then a destination. Each move is fed through
+// the same fork detector that powers the replay annotations, so
+// blunders and tactical opportunities get the same ?? / ! markers,
+// arrows, and feedback balloon.
+
+const freePlay = {
+  selected: -1,         // currently picked-up square, or -1
+  legalForSelected: [], // legal {from,to,...} moves for that square
+};
+
+function freePlayActive() {
+  return state.selectedGameIdx === -1;
+}
+
+function currentPosition() {
+  return state.positions[state.ply];
+}
+
+/** Build a minimal SAN string for display purposes (no disambiguation,
+ *  no check/mate suffix — the move-list cell shows whatever we hand it).
+ *  The fork annotations still come from the structured `findForks`
+ *  output, so this string is purely cosmetic. */
+function simpleSan(prevPos, from, to, promotion) {
+  const piece = prevPos.board[from];
+  if (!piece) return "?";
+  const pt = piece.toUpperCase();
+  // Castling
+  if (pt === "K" && Math.abs(fileOf(to) - fileOf(from)) === 2) {
+    return fileOf(to) === 6 ? "O-O" : "O-O-O";
+  }
+  const captured = prevPos.board[to] ||
+    (pt === "P" && fileOf(from) !== fileOf(to)); // en passant or normal capture
+  const dest = sqName(to);
+  const promo = promotion ? `=${promotion}` : "";
+  if (pt === "P") {
+    return captured ? `${FILES[fileOf(from)]}x${dest}${promo}` : `${dest}${promo}`;
+  }
+  return `${pt}${captured ? "x" : ""}${dest}`;
+}
+
+/** Build a SAN-shaped `move` object suitable for `applyMove`, given
+ *  the from/to/promotion the user clicked. Returns null if the piece
+ *  at `from` doesn't belong to the side-to-move. */
+function buildMoveObject(pos, from, to, promotion) {
+  const piece = pos.board[from];
+  if (!piece) return null;
+  const white = pos.sideToMove === "w";
+  if (isWhite(piece) !== white) return null;
+  const pt = piece.toUpperCase();
+  // Castling — king moving two files.
+  if (pt === "K" && Math.abs(fileOf(to) - fileOf(from)) === 2) {
+    return {
+      castle: fileOf(to) === 6 ? "K" : "Q",
+      piece: "K", fromFile: -1, fromRank: -1, to: -1,
+      capture: false, promotion: null, check: false, mate: false,
+      san: fileOf(to) === 6 ? "O-O" : "O-O-O",
+    };
+  }
+  const capture = !!pos.board[to] ||
+    (pt === "P" && fileOf(from) !== fileOf(to) && to === pos.epTarget);
+  return {
+    castle: null,
+    piece: pt,
+    fromFile: fileOf(from),
+    fromRank: rankOf(from),
+    to,
+    capture,
+    promotion: promotion || null,
+    check: false, mate: false,
+    san: simpleSan(pos, from, to, promotion),
+  };
+}
+
+/** Apply a user-initiated move. Truncates any forward history, pushes
+ *  the new position and its annotation onto the parallel arrays, and
+ *  jumps to the new ply so the existing rendering machinery picks it
+ *  up. Returns true on success. */
+function makeUserMove(from, to, promotion) {
+  const prev = currentPosition();
+  const moveObj = buildMoveObject(prev, from, to, promotion);
+  if (!moveObj) return false;
+
+  let next;
+  try {
+    next = applyMove(prev, moveObj);
+  } catch (err) {
+    console.warn("Illegal move", err.message);
+    return false;
+  }
+
+  // Annotate: was this move a winning fork that was already available?
+  const prevForks = findForks(prev);
+  const executed = prevForks.find(
+    (f) => f.move.from === from && f.move.to === to
+  );
+
+  // Did the move hand the opponent a fresh fork?
+  const newForks = findForks(next);
+  const prevKeys = new Set(prevForks.map((f) => `${f.move.from}-${f.move.to}`));
+  const fresh = newForks.filter(
+    (f) => !prevKeys.has(`${f.move.from}-${f.move.to}`)
+  );
+
+  // Truncate any forward history before appending.
+  state.positions = state.positions.slice(0, state.ply + 1);
+  state.sanList   = state.sanList.slice(0, state.ply);
+  state.blunders  = state.blunders.slice(0, state.ply + 1);
+  state.goodMoves = state.goodMoves.slice(0, state.ply + 1);
+
+  state.positions.push(next);
+  state.sanList.push(moveObj.san);
+  state.blunders.push(fresh.length ? fresh : null);
+  state.goodMoves.push(executed || null);
+
+  freePlay.selected = -1;
+  freePlay.legalForSelected = [];
+  renderMoveList();
+  setPly(state.positions.length - 1);
+  return true;
+}
+
+/** Highlight the currently-selected square plus all of its legal
+ *  destinations. Called from `setPly` so the indicators clear whenever
+ *  the user navigates away. */
+function renderSelection() {
+  for (const cell of els.board.children) {
+    cell.classList.remove("sel", "target", "capture");
+  }
+  if (!freePlayActive() || freePlay.selected < 0) return;
+  const selCell = els.board.querySelector(`[data-idx="${freePlay.selected}"]`);
+  selCell?.classList.add("sel");
+  const pos = currentPosition();
+  for (const mv of freePlay.legalForSelected) {
+    const cell = els.board.querySelector(`[data-idx="${mv.to}"]`);
+    if (!cell) continue;
+    cell.classList.add("target");
+    const captured = !!pos.board[mv.to] || mv.isEp;
+    if (captured) cell.classList.add("capture");
+  }
+}
+
+function onBoardClick(ev) {
+  if (!freePlayActive()) return;
+  const cell = ev.target.closest(".sq");
+  if (!cell || !els.board.contains(cell)) return;
+  const idx = parseInt(cell.dataset.idx, 10);
+  const pos = currentPosition();
+
+  // Second click: try to commit a move.
+  if (freePlay.selected >= 0) {
+    const mv = freePlay.legalForSelected.find((m) => m.to === idx);
+    if (mv) {
+      // Auto-queen on promotion. (Could be replaced by a chooser.)
+      makeUserMove(mv.from, mv.to, mv.promotion ? "Q" : null);
+      return;
+    }
+    // Clicking the selected square deselects.
+    if (idx === freePlay.selected) {
+      freePlay.selected = -1;
+      freePlay.legalForSelected = [];
+      renderSelection();
+      return;
+    }
+    // Otherwise fall through to "pick up another piece" below.
+  }
+
+  // First click (or re-selection): pick up own piece.
+  const piece = pos.board[idx];
+  if (!piece) {
+    freePlay.selected = -1;
+    freePlay.legalForSelected = [];
+    renderSelection();
+    return;
+  }
+  if (isWhite(piece) !== (pos.sideToMove === "w")) return;
+
+  freePlay.selected = idx;
+  freePlay.legalForSelected = legalMoves(pos)
+    .filter((m) => m.from === idx)
+    // Collapse promotion variants to a single target square — we
+    // auto-queen on commit.
+    .filter((m, i, arr) => !m.promotion ||
+      arr.findIndex((n) => n.to === m.to) === i);
+  renderSelection();
+}
+
+/** Wipe state back to a fresh starting position; used by the Reset
+ *  button when in free-play mode. */
+function resetFreePlay() {
+  state.selectedGameIdx = -1;
+  state.positions = [initialPosition()];
+  state.sanList = [];
+  state.blunders = [null];
+  state.goodMoves = [null];
+  freePlay.selected = -1;
+  freePlay.legalForSelected = [];
+  renderMoveList();
+  setPly(0);
+  updateFreePlayChrome();
+}
+
+/** Show or hide the bits of UI that only make sense in free-play mode
+ *  (the Reset button + the "interactive" cursor on board squares). */
+function updateFreePlayChrome() {
+  const active = freePlayActive();
+  els.board.classList.toggle("interactive", active);
+  if (els.btnReset) els.btnReset.hidden = !active;
+}
+
 // ---- Wire-up ---------------------------------------------------------
 function init() {
   buildBoardSquares();
-  renderBoard(initialPosition());
+  // Bootstrap the parallel annotation arrays for free-play mode so the
+  // existing render machinery (which indexes blunders[ply], etc.) works
+  // out of the box before the user has made any moves.
+  state.blunders = [null];
+  state.goodMoves = [null];
+  setPly(0);
+  updateFreePlayChrome();
 
   els.btnStart.addEventListener("click", () => setPly(0));
   els.btnPrev .addEventListener("click", () => setPly(state.ply - 1));
   els.btnNext .addEventListener("click", () => setPly(state.ply + 1));
   els.btnEnd  .addEventListener("click", () => setPly(state.positions.length - 1));
+  els.btnFlip ?.addEventListener("click", () => {
+    setOrientation(state.orientation === "w" ? "b" : "w");
+    setPly(state.ply); // re-render board contents into the rebuilt cells
+  });
+  els.btnReset?.addEventListener("click", resetFreePlay);
+  els.board.addEventListener("click", onBoardClick);
   els.filterInput.addEventListener("input", renderGameList);
 
   els.form.addEventListener("submit", (ev) => {
