@@ -672,6 +672,7 @@ const els = {
   gameTitle:    document.getElementById("game-title"),
   gameSubtitle: document.getElementById("game-subtitle"),
   board:        document.getElementById("board"),
+  boardOverlay: document.getElementById("board-overlay"),
   rankLabels:   document.getElementById("rank-labels"),
   fileLabels:   document.getElementById("file-labels"),
   playerTop:    document.getElementById("player-top"),
@@ -937,6 +938,7 @@ function setPly(p) {
   highlightActivePly();
   renderPlayerBars();
   renderMoveFeedback();
+  renderForkArrows();
 }
 
 function renderMoveFeedback() {
@@ -1009,6 +1011,106 @@ function spokenSan(san) {
 
   const verb = captures ? "takes" : "to";
   return `${pieceWord}${disambigPhrase} ${verb} ${dest}${promo}${trail}`;
+}
+
+// ---- Fork-arrow overlay ---------------------------------------------
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(name, attrs = {}) {
+  const el = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+/** Draw arrows from the forking piece's square to each of its targets.
+ *  Blunders (the opponent now has a fork) draw in the "loss" colour;
+ *  the player's own executed fork (good move) draws in the "win" colour. */
+function renderForkArrows() {
+  const svg = els.boardOverlay;
+  if (!svg) return;
+  svg.innerHTML = "";
+
+  const idx = state.ply;
+  if (idx <= 0) return;
+  const blunder = state.blunders[idx];
+  const good    = state.goodMoves[idx];
+  let sets = [];
+  if (blunder)   sets = blunder.map((f) => ({ fork: f, cls: "blunder" }));
+  else if (good) sets = [{ fork: good, cls: "good" }];
+  if (!sets.length) return;
+
+  // One arrowhead marker per colour, referenced by id from <line>.
+  // Use userSpaceOnUse so the arrowhead size is in board-square units
+  // (matching the viewBox), independent of the line's stroke-width.
+  const defs = svgEl("defs");
+  for (const cls of ["blunder", "good"]) {
+    const marker = svgEl("marker", {
+      id: `fa-head-${cls}`,
+      viewBox: "0 0 10 10",
+      refX: "8", refY: "5",
+      markerUnits: "userSpaceOnUse",
+      markerWidth: "0.45", markerHeight: "0.45",
+      orient: "auto-start-reverse",
+    });
+    const head = svgEl("path", { d: "M0,0 L10,5 L0,10 z" });
+    head.setAttribute("class", `fork-arrowhead-${cls}`);
+    marker.appendChild(head);
+    defs.appendChild(marker);
+  }
+  svg.appendChild(defs);
+
+  // For a blunder the attacker isn't actually on the board yet — it's
+  // still on `fork.move.from` and will arrive at `fork.move.to`. Drawing
+  // the arrow from the future destination is most informative for the
+  // *targets* but hides where the threat comes from, so we draw both:
+  //   * a dashed move arrow from .from -> .to
+  //   * solid threat arrows from .to -> each target
+  const whiteBottom = state.orientation === "w";
+  const center = (square) => {
+    const f = fileOf(square), r = rankOf(square);
+    const col = whiteBottom ? f : 7 - f;
+    const row = whiteBottom ? 7 - r : r;
+    return { x: col + 0.5, y: row + 0.5 };
+  };
+  // Shorten lines slightly so the arrowhead doesn't cover the target glyph.
+  const shorten = (a, b, by) => {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: b.x - (dx / len) * by, y: b.y - (dy / len) * by };
+  };
+
+  for (const { fork, cls } of sets) {
+    const fromC = center(fork.move.from);
+    const toC   = center(fork.move.to);
+
+    // Dashed "move" arrow only when the move hasn't been played yet
+    // (blunders). For executed forks, the last-move highlight already
+    // shows from->to and an extra arrow would just add clutter.
+    // Stroke-width is set as an SVG attribute (user-space units) so it
+    // scales with the board; CSS pixel widths would be re-interpreted
+    // by the viewBox and render either invisible or enormous.
+    if (cls === "blunder") {
+      const tip = shorten(fromC, toC, 0.25);
+      const mv = svgEl("line", {
+        x1: fromC.x, y1: fromC.y, x2: tip.x, y2: tip.y,
+        "stroke-width": "0.13",
+        "marker-end": `url(#fa-head-${cls})`,
+      });
+      mv.setAttribute("class", `fork-move-${cls}`);
+      svg.appendChild(mv);
+    }
+
+    for (const t of fork.targets) {
+      const targetC = center(t.square);
+      const tip = shorten(toC, targetC, 0.32);
+      const line = svgEl("line", {
+        x1: toC.x, y1: toC.y, x2: tip.x, y2: tip.y,
+        "stroke-width": "0.13",
+        "marker-end": `url(#fa-head-${cls})`,
+      });
+      line.setAttribute("class", `fork-arrow-${cls}`);
+      svg.appendChild(line);
+    }
+  }
 }
 
 // ---- Game list -------------------------------------------------------
