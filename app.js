@@ -791,6 +791,8 @@ const els = {
   statusLabel:  document.getElementById("status-label"),
   filterInput:  document.getElementById("filter-input"),
   gameList:     document.getElementById("game-list"),
+  gameListPane: document.getElementById("game-list-pane"),
+  btnToggleGames: document.getElementById("btn-toggle-games"),
   gameTitle:    document.getElementById("game-title"),
   gameSubtitle: document.getElementById("game-subtitle"),
   board:        document.getElementById("board"),
@@ -1731,6 +1733,26 @@ function selectGame(idx) {
     li.classList.toggle("active", parseInt(li.dataset.idx, 10) === idx);
   }
   updateFreePlayChrome();
+  // Auto-collapse the games sidebar so the board has more room.
+  // The user can re-open it any time via the toggle button.
+  setGameListCollapsed(true);
+}
+
+/** Collapse or expand the games sidebar. When collapsed the panel
+ *  shrinks to a thin strip and the toggle button becomes the only
+ *  interactive element. */
+function setGameListCollapsed(collapsed) {
+  const pane = els.gameListPane;
+  const btn  = els.btnToggleGames;
+  if (!pane) return;
+  pane.classList.toggle("collapsed", collapsed);
+  document.body.classList.toggle("games-collapsed", collapsed);
+  if (btn) {
+    btn.textContent = collapsed ? "»" : "«";
+    const label = collapsed ? "Expand games panel" : "Collapse games panel";
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
 }
 
 // ---- Loading ---------------------------------------------------------
@@ -2073,7 +2095,8 @@ function onBoardClick(ev) {
 }
 
 /** Wipe state back to a fresh starting position; used by the Reset
- *  button when in free-play mode. */
+ *  button to either restart a free-play game or to leave a loaded
+ *  chess.com game and return to free play. */
 function resetFreePlay() {
   state.selectedGameIdx = -1;
   state.positions = [initialPosition()];
@@ -2085,17 +2108,27 @@ function resetFreePlay() {
   state.mateThreats = [null];
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
+  els.gameTitle.textContent = "Free play — click pieces to move";
+  renderGameList();        // drop the .active highlight in the sidebar
   renderMoveList();
   setPly(0);
   updateFreePlayChrome();
+  // Re-open the games sidebar so the user can pick another game.
+  setGameListCollapsed(false);
 }
 
 /** Show or hide the bits of UI that only make sense in free-play mode
- *  (the Reset button + the "interactive" cursor on board squares). */
+ *  (the "interactive" cursor on board squares). The Reset button is
+ *  always visible — its tooltip changes based on whether it will
+ *  restart a free-play game or exit a loaded chess.com game. */
 function updateFreePlayChrome() {
   const active = freePlayActive();
   els.board.classList.toggle("interactive", active);
-  if (els.btnReset) els.btnReset.hidden = !active;
+  if (els.btnReset) {
+    els.btnReset.title = active
+      ? "Reset to starting position"
+      : "Back to free play";
+  }
 }
 
 // ---- Wire-up ---------------------------------------------------------
@@ -2123,6 +2156,10 @@ function init() {
   els.btnReset?.addEventListener("click", resetFreePlay);
   els.board.addEventListener("click", onBoardClick);
   els.filterInput.addEventListener("input", renderGameList);
+  els.btnToggleGames?.addEventListener("click", () => {
+    const collapsed = els.gameListPane?.classList.contains("collapsed");
+    setGameListCollapsed(!collapsed);
+  });
 
   els.form.addEventListener("submit", (ev) => {
     ev.preventDefault();
