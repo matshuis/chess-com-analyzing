@@ -170,6 +170,16 @@ main {
   gap: 0.4rem;
   flex: 0 0 auto;
 }
+#moves-column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1 1 260px;
+  min-width: 220px;
+  max-width: 360px;
+  min-height: 0;
+  align-self: stretch;
+}
 
 #game-header { flex: 0 0 auto; }
 #game-header h2 { margin: 0; font-size: 0.95rem; }
@@ -232,12 +242,12 @@ main {
   grid-template-columns: 18px min-content;
   grid-template-rows: min-content 18px;
   gap: 2px;
-  align-items: center;
+  align-items: stretch;
   justify-content: start;
 }
 
-#rank-labels { grid-row: 1; grid-column: 1; display: grid; grid-template-rows: repeat(8, 1fr); }
-#file-labels { grid-row: 2; grid-column: 2; display: grid; grid-template-columns: repeat(8, 1fr); }
+#rank-labels { grid-row: 1; grid-column: 1; display: grid; grid-template-rows: repeat(8, 1fr); height: 100%; }
+#file-labels { grid-row: 2; grid-column: 2; display: grid; grid-template-columns: repeat(8, 1fr); width: 100%; }
 .axis-labels span {
   display: flex;
   align-items: center;
@@ -308,13 +318,63 @@ main {
   gap: 0.15rem 0.4rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85rem;
-  flex: 1 1 260px;
-  min-width: 220px;
-  max-width: 360px;
-  align-self: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 #move-list .num { color: var(--muted); text-align: right; padding-right: 0.25rem; }
 #move-list .ply { padding: 0.1rem 0.3rem; cursor: pointer; border-radius: 3px; }
 #move-list .ply:hover { background: var(--panel-2); }
 #move-list .ply.active { background: var(--accent-2); color: white; }
+#move-list .ply.blunder { color: var(--loss); font-weight: 600; cursor: help; }
+#move-list .ply.blunder.active { color: white; background: var(--loss); }
+#move-list .ply.good    { color: var(--win);  font-weight: 600; cursor: help; }
+#move-list .ply.good.active    { color: #0b2d12; background: var(--win); }
+
+#move-feedback {
+  position: relative;
+  margin: 0 0 0.6rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: 14px;
+  font-size: 0.85rem;
+  line-height: 1.3;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  flex: 0 0 auto;
+  /* Speech-balloon tail points DOWN toward the move list below. */
+}
+#move-feedback::before,
+#move-feedback::after {
+  content: "";
+  position: absolute;
+  left: 1.6rem;
+  width: 0;
+  height: 0;
+  border-style: solid;
+}
+/* Outline triangle (matches the balloon's border colour). */
+#move-feedback::before {
+  bottom: -10px;
+  border-width: 10px 9px 0 9px;
+  border-color: var(--bf-border, var(--border)) transparent transparent transparent;
+}
+/* Fill triangle, 1px inside the outline so the border stays continuous. */
+#move-feedback::after {
+  bottom: -9px;
+  border-width: 9px 8px 0 8px;
+  border-color: var(--bf-bg, var(--panel)) transparent transparent transparent;
+}
+#move-feedback.blunder {
+  --bf-border: var(--loss);
+  --bf-bg: color-mix(in srgb, var(--loss) 12%, var(--panel));
+  color: var(--loss);
+  border-color: var(--bf-border);
+  background: var(--bf-bg);
+}
+#move-feedback.good {
+  --bf-border: var(--win);
+  --bf-bg: color-mix(in srgb, var(--win) 12%, var(--panel));
+  color: var(--win);
+  border-color: var(--bf-border);
+  background: var(--bf-bg);
+}

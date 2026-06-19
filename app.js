@@ -372,11 +372,226 @@ function leavesKingInCheck(pos, from, move) {
 }
 
 // =====================================================================
+//  Tactical analysis: legal moves + fork detector
+// =====================================================================
+//
+// Mirror of the Python helpers in chess_engine.py. Used to flag
+// blunders in the move list — i.e. moves that hand the opponent a
+// fork.
+
+const PIECE_VALUE = { P: 1, N: 3, B: 3, R: 5, Q: 9, K: 100 };
+
+function pseudoLegalMoves(pos) {
+  const out = [];
+  const white = pos.sideToMove === "w";
+  for (let frm = 0; frm < 64; frm++) {
+    const p = pos.board[frm];
+    if (!p || isWhite(p) !== white) continue;
+    const pt = p.toUpperCase();
+    const f = fileOf(frm), r = rankOf(frm);
+
+    if (pt === "P") {
+      const dir = white ? 1 : -1;
+      const startRank = white ? 1 : 6;
+      const promoRank = white ? 7 : 0;
+      const r1 = r + dir;
+      if (r1 >= 0 && r1 < 8 && pos.board[sq(f, r1)] === "") {
+        if (r1 === promoRank) {
+          for (const promo of "QRBN") out.push({ from: frm, to: sq(f, r1), promotion: promo });
+        } else {
+          out.push({ from: frm, to: sq(f, r1) });
+        }
+        if (r === startRank && pos.board[sq(f, r + 2 * dir)] === "") {
+          out.push({ from: frm, to: sq(f, r + 2 * dir) });
+        }
+      }
+      for (const df of [-1, 1]) {
+        const tf = f + df, tr = r + dir;
+        if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+        const target = sq(tf, tr);
+        const tp = pos.board[target];
+        if (tp && isWhite(tp) !== white) {
+          if (tr === promoRank) {
+            for (const promo of "QRBN") out.push({ from: frm, to: target, promotion: promo });
+          } else {
+            out.push({ from: frm, to: target });
+          }
+        } else if (target === pos.epTarget) {
+          out.push({ from: frm, to: target, isEp: true });
+        }
+      }
+    } else if (pt === "N") {
+      for (const [df, dr] of KNIGHT_DELTAS) {
+        const tf = f + df, tr = r + dr;
+        if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+        const target = sq(tf, tr);
+        const tp = pos.board[target];
+        if (!tp || isWhite(tp) !== white) out.push({ from: frm, to: target });
+      }
+    } else if (pt === "K") {
+      for (const [df, dr] of KING_DELTAS) {
+        const tf = f + df, tr = r + dr;
+        if (tf < 0 || tf > 7 || tr < 0 || tr > 7) continue;
+        const target = sq(tf, tr);
+        const tp = pos.board[target];
+        if (!tp || isWhite(tp) !== white) out.push({ from: frm, to: target });
+      }
+      // Castling — required only for completeness of the legal-move
+      // generator. We skip it here because forks during castling are
+      // not relevant in practice and the SAN replay path handles
+      // castles separately.
+    } else {
+      const dirs = pt === "B" ? BISHOP_DIRS
+                : pt === "R" ? ROOK_DIRS
+                : KING_DELTAS; // Q
+      for (const [df, dr] of dirs) {
+        let tf = f + df, tr = r + dr;
+        while (tf >= 0 && tf < 8 && tr >= 0 && tr < 8) {
+          const target = sq(tf, tr);
+          const tp = pos.board[target];
+          if (tp) {
+            if (isWhite(tp) !== white) out.push({ from: frm, to: target });
+            break;
+          }
+          out.push({ from: frm, to: target });
+          tf += df; tr += dr;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function makeBareMove(pos, mv) {
+  // Simplified mover used for pseudo-legal exploration only — no
+  // castling-rights / EP bookkeeping beyond what the fork search needs.
+  const next = clonePosition(pos);
+  const piece = next.board[mv.from];
+  next.board[mv.from] = "";
+  if (mv.isEp) {
+    next.board[sq(fileOf(mv.to), rankOf(mv.from))] = "";
+    next.board[mv.to] = piece;
+  } else if (mv.promotion) {
+    next.board[mv.to] = isWhite(piece) ? mv.promotion : mv.promotion.toLowerCase();
+  } else {
+    next.board[mv.to] = piece;
+  }
+  next.epTarget = -1;
+  if (piece.toUpperCase() === "P" && Math.abs(rankOf(mv.to) - rankOf(mv.from)) === 2) {
+    next.epTarget = sq(fileOf(mv.from), (rankOf(mv.from) + rankOf(mv.to)) / 2);
+  }
+  next.lastMove = { from: mv.from, to: mv.to };
+  next.sideToMove = pos.sideToMove === "w" ? "b" : "w";
+  return next;
+}
+
+function legalMoves(pos) {
+  const out = [];
+  const white = pos.sideToMove === "w";
+  for (const mv of pseudoLegalMoves(pos)) {
+    const next = makeBareMove(pos, mv);
+    const ksq = findKing(next.board, white);
+    if (ksq < 0) continue;
+    if (!isSquareAttackedBy(next.board, ksq, !white)) out.push(mv);
+  }
+  return out;
+}
+
+function attacksFrom(board, frm) {
+  const p = board[frm];
+  if (!p) return [];
+  const pt = p.toUpperCase();
+  const white = isWhite(p);
+  const f = fileOf(frm), r = rankOf(frm);
+  const out = [];
+  if (pt === "P") {
+    const dir = white ? 1 : -1;
+    for (const df of [-1, 1]) {
+      const tf = f + df, tr = r + dir;
+      if (tf >= 0 && tf < 8 && tr >= 0 && tr < 8) out.push(sq(tf, tr));
+    }
+  } else if (pt === "N") {
+    for (const [df, dr] of KNIGHT_DELTAS) {
+      const tf = f + df, tr = r + dr;
+      if (tf >= 0 && tf < 8 && tr >= 0 && tr < 8) out.push(sq(tf, tr));
+    }
+  } else if (pt === "K") {
+    for (const [df, dr] of KING_DELTAS) {
+      const tf = f + df, tr = r + dr;
+      if (tf >= 0 && tf < 8 && tr >= 0 && tr < 8) out.push(sq(tf, tr));
+    }
+  } else {
+    const dirs = pt === "B" ? BISHOP_DIRS
+              : pt === "R" ? ROOK_DIRS
+              : KING_DELTAS;
+    for (const [df, dr] of dirs) {
+      let tf = f + df, tr = r + dr;
+      while (tf >= 0 && tf < 8 && tr >= 0 && tr < 8) {
+        out.push(sq(tf, tr));
+        if (board[sq(tf, tr)]) break;
+        tf += df; tr += dr;
+      }
+    }
+  }
+  return out;
+}
+
+/** Return every legal move for `pos.sideToMove` that creates a
+ *  *winning* fork: the moved piece attacks ≥ 2 enemy pieces, at least
+ *  one of those targets is the king or strictly more valuable than
+ *  the attacker, **and** the attacker's destination square is not
+ *  defended by the opponent (so it can't simply be captured back). */
+function findForks(pos) {
+  const forks = [];
+  const attackerIsWhite = pos.sideToMove === "w";
+  for (const mv of legalMoves(pos)) {
+    const next = makeBareMove(pos, mv);
+    const attacker = next.board[mv.to];
+    if (!attacker) continue;
+    // The attacker must not be capturable.
+    if (isSquareAttackedBy(next.board, mv.to, !attackerIsWhite)) continue;
+    const atkValue = PIECE_VALUE[attacker.toUpperCase()];
+    const targets = [];
+    for (const s of attacksFrom(next.board, mv.to)) {
+      const tp = next.board[s];
+      if (!tp || isWhite(tp) === isWhite(attacker)) continue;
+      targets.push({ square: s, piece: tp });
+    }
+    if (targets.length < 2) continue;
+    const critical = targets.some((t) =>
+      t.piece.toUpperCase() === "K" ||
+      PIECE_VALUE[t.piece.toUpperCase()] > atkValue
+    );
+    if (critical) forks.push({ move: mv, targets, attacker });
+  }
+  return forks;
+}
+
+const PIECE_NAMES = {
+  P: "pawn", N: "knight", B: "bishop",
+  R: "rook", Q: "queen",  K: "king",
+};
+const pieceName = (p) => PIECE_NAMES[p.toUpperCase()] || p;
+
+function describeFork(fork) {
+  const from = sqName(fork.move.from);
+  const to   = sqName(fork.move.to);
+  const attackerName = fork.attacker ? pieceName(fork.attacker) : "piece";
+  const tgts = fork.targets
+    .map((t) => `${pieceName(t.piece)} on ${sqName(t.square)}`)
+    .join(", ");
+  return `${attackerName} ${from}→${to} attacks ${tgts}`;
+}
+
+// =====================================================================
 //  Game replay
 // =====================================================================
 
 /** Build the full list of positions for a PGN, one entry per ply
- *  (positions[0] = initial, positions[i] = after the i-th half-move). */
+ *  (positions[0] = initial, positions[i] = after the i-th half-move).
+ *  Also returns a parallel `blunders` array — `blunders[i]` is null
+ *  unless the move that produced positions[i] allowed the opponent
+ *  a fork, in which case it holds the forks the opponent now has. */
 function replayPgn(pgn) {
   const tokens = tokenizePgnMoves(pgn);
   const positions = [initialPosition()];
@@ -392,7 +607,41 @@ function replayPgn(pgn) {
       break;
     }
   }
-  return { positions, sanList };
+
+  // Annotate moves:
+  //   * blunders[i]  — non-null if the move that produced positions[i]
+  //                    allowed the opponent a fresh fork (a fork that
+  //                    wasn't already on the board before the move).
+  //   * goodMoves[i] — non-null if the move that produced positions[i]
+  //                    *is itself* a winning fork the side-to-move
+  //                    had available in positions[i-1].
+  const blunders  = new Array(positions.length).fill(null);
+  const goodMoves = new Array(positions.length).fill(null);
+  let prevForks = findForks(positions[0]);
+  for (let i = 1; i < positions.length; i++) {
+    // Was the move just played one of the forks that were available?
+    const played = positions[i].lastMove;
+    if (played) {
+      const executed = prevForks.find(
+        (f) => f.move.from === played.from && f.move.to === played.to
+      );
+      if (executed) goodMoves[i] = executed;
+    }
+
+    const here = findForks(positions[i]);
+    if (here.length) {
+      const prevSquares = new Set(
+        prevForks.map((f) => `${f.move.from}-${f.move.to}`)
+      );
+      const fresh = here.filter(
+        (f) => !prevSquares.has(`${f.move.from}-${f.move.to}`)
+      );
+      if (fresh.length) blunders[i] = fresh;
+    }
+    prevForks = here;
+  }
+
+  return { positions, sanList, blunders, goodMoves };
 }
 
 // =====================================================================
@@ -406,6 +655,8 @@ const state = {
   selectedGameIdx: -1,
   positions: [initialPosition()],
   sanList: [],
+  blunders: [],
+  goodMoves: [],
   ply: 0, // index into positions
   orientation: "w", // "w" = white at the bottom, "b" = black at the bottom
 };
@@ -431,6 +682,7 @@ const els = {
   btnEnd:       document.getElementById("btn-end"),
   plyInd:       document.getElementById("ply-indicator"),
   moveList:     document.getElementById("move-list"),
+  feedback:     document.getElementById("move-feedback"),
 };
 
 function buildBoardSquares() {
@@ -475,10 +727,12 @@ function setOrientation(o) {
 
 // ---- Player bars / captures -----------------------------------------
 //
-// Standard starting piece counts and material values used to display
-// the captured pieces and the material balance under each player.
+// Standard starting piece counts used to display the captured pieces
+// and the material balance under each player. Material values are
+// shared with the tactical analysis helper (`PIECE_VALUE`, defined
+// above) — kings are always present on both sides so their value
+// cancels in the W-B difference regardless of what we use.
 const START_COUNTS = { P: 8, N: 2, B: 2, R: 2, Q: 1, K: 1 };
-const PIECE_VALUE  = { P: 1, N: 3, B: 3, R: 5, Q: 9, K: 0 };
 // Order in which to render captured pieces (most valuable first).
 const CAPTURE_ORDER = ["Q", "R", "B", "N", "P"];
 
@@ -637,9 +891,26 @@ function renderMoveList() {
       const span = document.createElement("div");
       span.className = "ply";
       if (ply < total) {
-        span.textContent = state.sanList[ply];
-        span.dataset.ply = ply + 1; // positions index after this move
-        span.addEventListener("click", () => setPly(ply + 1));
+        const positionIdx = ply + 1; // positions index after this move
+        const blunder = state.blunders[positionIdx];
+        const good    = state.goodMoves[positionIdx];
+        let label = state.sanList[ply];
+        // Blunder takes precedence — the long-term cost outweighs the
+        // immediate gain — but in practice the two are mutually
+        // exclusive (you don't usually hand over a fork while making one).
+        if (blunder) {
+          label += "??";
+          span.classList.add("blunder");
+          span.title = "Allows fork: "
+            + blunder.map(describeFork).join("; ");
+        } else if (good) {
+          label += "!";
+          span.classList.add("good");
+          span.title = "Fork: " + describeFork(good);
+        }
+        span.textContent = label;
+        span.dataset.ply = positionIdx;
+        span.addEventListener("click", () => setPly(positionIdx));
       } else {
         span.textContent = "";
       }
@@ -665,6 +936,79 @@ function setPly(p) {
   els.btnEnd.disabled   = els.btnNext.disabled = state.ply === state.positions.length - 1;
   highlightActivePly();
   renderPlayerBars();
+  renderMoveFeedback();
+}
+
+function renderMoveFeedback() {
+  const fb = els.feedback;
+  if (!fb) return;
+  fb.className = "";
+  fb.textContent = "";
+  const idx = state.ply;
+  if (idx <= 0) { fb.hidden = true; return; }
+  const san = state.sanList[idx - 1];
+  const spoken = spokenSan(san);
+  const blunder = state.blunders[idx];
+  const good    = state.goodMoves[idx];
+  if (blunder) {
+    fb.hidden = false;
+    fb.classList.add("blunder");
+    const detail = blunder.map(describeFork).join("; ");
+    fb.textContent = `⚠ ${spoken} (??) — allows fork: ${detail}`;
+  } else if (good) {
+    fb.hidden = false;
+    fb.classList.add("good");
+    fb.textContent = `★ ${spoken} (!) — fork: ${describeFork(good)}`;
+  } else {
+    fb.hidden = true;
+  }
+}
+
+/** Turn a SAN token like "Qd5", "Nge7", "exd5", "O-O-O", "e8=Q+"
+ *  into a readable English phrase used by the feedback balloon. */
+function spokenSan(san) {
+  if (!san) return "";
+  // Strip trailing check/mate markers but remember them.
+  let trail = "";
+  let core = san;
+  if (core.endsWith("#")) { trail = " checkmate"; core = core.slice(0, -1); }
+  else if (core.endsWith("+")) { trail = " with check"; core = core.slice(0, -1); }
+
+  if (core === "O-O" || core === "0-0") return "kingside castle" + trail;
+  if (core === "O-O-O" || core === "0-0-0") return "queenside castle" + trail;
+
+  // Promotion: split off "=Q" / "Q" suffix.
+  let promo = "";
+  const promoMatch = core.match(/=?([QRBN])$/);
+  if (promoMatch) {
+    promo = `, promote to ${PIECE_NAMES[promoMatch[1]]}`;
+    core = core.slice(0, -promoMatch[0].length);
+  }
+
+  // Piece prefix (uppercase letter) or implicit pawn.
+  let pieceLetter = "P";
+  if (/^[KQRBN]/.test(core)) {
+    pieceLetter = core[0];
+    core = core.slice(1);
+  }
+  const pieceWord = PIECE_NAMES[pieceLetter];
+
+  // Capture marker.
+  const captures = core.includes("x");
+  if (captures) core = core.replace("x", "");
+
+  // Whatever's left is "[disambig]dest" — dest is the trailing 2 chars.
+  const dest = core.slice(-2);
+  const disambig = core.slice(0, -2);
+  let disambigPhrase = "";
+  if (disambig) {
+    if (/^[a-h]$/.test(disambig))      disambigPhrase = ` (${disambig}-file)`;
+    else if (/^[1-8]$/.test(disambig)) disambigPhrase = ` (rank ${disambig})`;
+    else                               disambigPhrase = ` (from ${disambig})`;
+  }
+
+  const verb = captures ? "takes" : "to";
+  return `${pieceWord}${disambigPhrase} ${verb} ${dest}${promo}${trail}`;
 }
 
 // ---- Game list -------------------------------------------------------
@@ -744,9 +1088,11 @@ function selectGame(idx) {
   const g = state.games[idx];
   if (!g) return;
 
-  const { positions, sanList } = replayPgn(g.pgn || "");
+  const { positions, sanList, blunders, goodMoves } = replayPgn(g.pgn || "");
   state.positions = positions;
   state.sanList = sanList;
+  state.blunders = blunders;
+  state.goodMoves = goodMoves;
   state.ply = 0;
 
   // Orient the board so the queried player is always at the bottom.

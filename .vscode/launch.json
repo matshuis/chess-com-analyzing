@@ -4,26 +4,6 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Download games (prompt for username)",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/download_games.py",
-      "args": ["${input:chessUsername}"],
-      "console": "integratedTerminal",
-      "cwd": "${workspaceFolder}",
-      "justMyCode": true
-    },
-    {
-      "name": "Download games (--full)",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "${workspaceFolder}/download_games.py",
-      "args": ["${input:chessUsername}", "--full"],
-      "console": "integratedTerminal",
-      "cwd": "${workspaceFolder}",
-      "justMyCode": true
-    },
-    {
       "name": "Serve UI (http://localhost:8000)",
       "type": "debugpy",
       "request": "launch",
@@ -31,35 +11,6 @@
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
       "justMyCode": true
-    },
-    {
-      "name": "Open UI in Chrome",
-      "type": "chrome",
-      "request": "launch",
-      "url": "http://localhost:8000",
-      "webRoot": "${workspaceFolder}"
-    },
-    {
-      "name": "Open UI in Edge",
-      "type": "msedge",
-      "request": "launch",
-      "url": "http://localhost:8000",
-      "webRoot": "${workspaceFolder}"
-    }
-  ],
-  "compounds": [
-    {
-      "name": "Serve + open in Chrome",
-      "configurations": ["Serve UI (http://localhost:8000)", "Open UI in Chrome"],
-      "stopAll": true
-    }
-  ],
-  "inputs": [
-    {
-      "id": "chessUsername",
-      "type": "promptString",
-      "description": "chess.com username to download games for",
-      "default": ""
     }
   ]
 }
