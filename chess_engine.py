@@ -695,9 +695,14 @@ def find_mate_threats(pos: Position) -> list:
 
     Returns an empty list when side-to-move is already in check — the
     check itself is the more urgent thing to handle, and a position
-    with two kings under attack is illegal anyway.
+    with two kings under attack is illegal anyway.  Also returns an
+    empty list when side-to-move has no legal moves at all: that is
+    stalemate (checkmate is filtered by the ``in_check`` guard above),
+    the game is already over, and there is nothing to warn about.
     """
     if in_check(pos):
+        return []
+    if not legal_moves(pos):
         return []
     swapped = _swap_side(pos)
     # A null move forfeits any en-passant right.

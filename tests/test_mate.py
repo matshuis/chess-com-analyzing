@@ -135,3 +135,16 @@ def test_no_mate_threat_in_starting_position():
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     )
     assert find_mate_threats(pos) == []
+
+
+def test_no_mate_threat_in_stalemate_position():
+    """Stalemate ends the game — there is no move to warn about.
+
+    Position: Black king h8, White king f7, White queen g6, Black to
+    move.  Black is not in check but has no legal moves.  Without the
+    stalemate guard, ``find_mate_threats`` happily swaps sides and
+    reports Qg7# as a "threat", producing a misleading warning on the
+    final position of a stalemated game.
+    """
+    pos = Position.from_fen("7k/5K2/6Q1/8/8/8/8/8 b - - 0 1")
+    assert find_mate_threats(pos) == []

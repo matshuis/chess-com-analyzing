@@ -715,9 +715,12 @@ function findMateInOne(pos) {
  *
  *  Returns [] when side-to-move is already in check — the check
  *  itself is the more pressing issue and a position with both kings
- *  under attack is illegal anyway. */
+ *  under attack is illegal anyway.  Also returns [] when side-to-move
+ *  has no legal moves: that is stalemate (checkmate is filtered by
+ *  the `inCheck` guard above) and the game is already over. */
 function findMateThreats(pos) {
   if (inCheck(pos)) return [];
+  if (legalMoves(pos).length === 0) return [];
   const swapped = clonePosition(pos);
   swapped.sideToMove = pos.sideToMove === "w" ? "b" : "w";
   swapped.epTarget = -1; // a null move forfeits en-passant rights
