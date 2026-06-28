@@ -583,6 +583,100 @@ function describeFork(fork) {
   return `${attackerName} ${from}→${to} attacks ${tgts}`;
 }
 
+// ---- Pin detection --------------------------------------------------
+//
+// Mirror of `chess_engine.find_pins`. A move is a *winning pin* when
+// the moving piece is a bishop/rook/queen, the ray it newly controls
+// pierces exactly one enemy piece (not the king) and then meets a
+// second enemy piece — either the king (absolute pin) or one
+// strictly more valuable than the pinned piece (relative pin) — and
+// the attacker's landing square is not attacked back.
+
+const PIN_DIRS = {
+  B: BISHOP_DIRS,
+  R: ROOK_DIRS,
+  Q: [...BISHOP_DIRS, ...ROOK_DIRS],
+};
+
+function findPins(pos) {
+  const pins = [];
+  const attackerIsWhite = pos.sideToMove === "w";
+  for (const mv of legalMoves(pos)) {
+    const next = makeBareMove(pos, mv);
+    const attacker = next.board[mv.to];
+    if (!attacker) continue;
+    const pt = attacker.toUpperCase();
+    const dirs = PIN_DIRS[pt];
+    if (!dirs) continue;
+    // Same safety rule as findForks: the pinning piece must not be
+    // capturable next move.
+    if (isSquareAttackedBy(next.board, mv.to, !attackerIsWhite)) continue;
+
+    const f0 = fileOf(mv.to), r0 = rankOf(mv.to);
+    for (const [df, dr] of dirs) {
+      let f = f0 + df, r = r0 + dr;
+      let first = null; // { square, piece } of the first enemy on the ray
+      while (f >= 0 && f < 8 && r >= 0 && r < 8) {
+        const s = sq(f, r);
+        const p = next.board[s];
+        if (p) {
+          const own = isWhite(p) === isWhite(attacker);
+          if (first === null) {
+            if (own) break;                       // blocked by friend
+            if (p.toUpperCase() === "K") break;    // that's check, not pin
+            first = { square: s, piece: p };
+          } else {
+            if (own) break;                       // friend shields the back rank
+            const frontVal = PIECE_VALUE[first.piece.toUpperCase()];
+            const backVal  = PIECE_VALUE[p.toUpperCase()];
+            const absolute = p.toUpperCase() === "K";
+            // Back piece must be the king or strictly more valuable.
+            if (!absolute && backVal <= frontVal) break;
+            // SEE-lite filter (mirrors `_pin_wins_material` in
+            // chess_engine.py): only flag the pin if capturing the
+            // pinned piece actually nets material — otherwise the UI
+            // floods with cosmetic "pins" like Qh5 → f7 (pinned to
+            // the king but defended, so Qxf7 just hangs the queen).
+            if (!pinWinsMaterial(next.board, mv.to, first.square, attackerIsWhite)) {
+              break;
+            }
+            pins.push({
+              move: mv, attacker,
+              pinnedSquare: first.square, pinnedPiece: first.piece,
+              behindSquare: s,            behindPiece: p,
+              absolute,
+            });
+            break;
+          }
+        }
+        f += df; r += dr;
+      }
+    }
+  }
+  return pins;
+}
+
+/** Would capturing the piece on `pinnedSquare` win material for the
+ *  attacker side? Mirrors `_pin_wins_material` in chess_engine.py:
+ *  true when the pinned piece is undefended, or strictly more
+ *  valuable than the pinning piece. */
+function pinWinsMaterial(board, attackerSquare, pinnedSquare, attackerIsWhite) {
+  const attackerVal = PIECE_VALUE[board[attackerSquare].toUpperCase()];
+  const pinnedVal   = PIECE_VALUE[board[pinnedSquare].toUpperCase()];
+  const defenders   = findAttackers(board, pinnedSquare, !attackerIsWhite);
+  return defenders.length === 0 || pinnedVal > attackerVal;
+}
+
+function describePin(pin) {
+  const from = sqName(pin.move.from);
+  const to   = sqName(pin.move.to);
+  const attackerName = pin.attacker ? pieceName(pin.attacker) : "piece";
+  const kind = pin.absolute ? "absolute" : "relative";
+  return `${attackerName} ${from}→${to} — ${kind} pin: `
+       + `${pieceName(pin.pinnedPiece)} on ${sqName(pin.pinnedSquare)} `
+       + `shields ${pieceName(pin.behindPiece)} on ${sqName(pin.behindSquare)}`;
+}
+
 // ---- Mate detection -------------------------------------------------
 //
 // Mirrors the Python helpers in chess_engine.py. We need three things
@@ -723,6 +817,74 @@ function describeHanging(h) {
 }
 
 // =====================================================================
+//  Material evaluation
+// =====================================================================
+//
+// Mirror of `evaluate` / `score_move` / `best_move` in chess_engine.py.
+// The simplest possible evaluator — sum the value of every non-king
+// piece, signed by color.  Enough to catch blunders that lose material
+// outright and to suggest the move that wins the most material in the
+// current position.  Kings are excluded because both sides always have
+// one, so they cancel out.
+
+const EVAL_VALUES = { P: 1, N: 3, B: 3, R: 5, Q: 9 };
+
+/** Material balance of `pos` from White's perspective, in pawn units.
+ *  Positive = White is ahead, negative = Black is ahead. */
+function evaluatePosition(pos) {
+  let s = 0;
+  for (const p of pos.board) {
+    if (!p) continue;
+    const v = EVAL_VALUES[p.toUpperCase()];
+    if (v === undefined) continue;
+    s += isWhite(p) ? v : -v;
+  }
+  return s;
+}
+
+/** Material gained by `move` from the perspective of the side to move.
+ *  Positive = good for the mover, negative = loses material.
+ *  `move` is the bare {from, to, promotion} shape produced by
+ *  `legalMoves`; convert it to the SAN-shaped object `applyMove`
+ *  expects before applying. */
+function scoreMove(pos, move) {
+  const sanMove = sanMoveFor(pos, move);
+  const delta = evaluatePosition(applyMove(pos, sanMove)) - evaluatePosition(pos);
+  return pos.sideToMove === "w" ? delta : -delta;
+}
+
+/** Return `{ move, score }` for the highest-scoring legal move in `pos`,
+ *  or `null` if there are no legal moves (mate or stalemate). */
+function bestMove(pos) {
+  let best = null;
+  let bestScore = -Infinity;
+  for (const mv of legalMoves(pos)) {
+    const s = scoreMove(pos, mv);
+    if (s > bestScore) { best = mv; bestScore = s; }
+  }
+  return best ? { move: best, score: bestScore } : null;
+}
+
+/** Coordinate-style description of a move (e.g. "Qd1xd5", "e2-e4").
+ *  Used in tooltips when we want to mention a move that was *not*
+ *  played, where we don't have an existing SAN string to lean on. */
+function describeMoveCoord(pos, mv) {
+  const piece = pos.board[mv.from] || "";
+  const sym = piece && piece.toUpperCase() !== "P" ? piece.toUpperCase() : "";
+  const sep = pos.board[mv.to] || mv.isEp ? "x" : "-";
+  return `${sym}${sqName(mv.from)}${sep}${sqName(mv.to)}`;
+}
+
+/** Format a pawn-units score as a signed decimal (e.g. "+1.5", "−0.3").
+ *  Returns an empty string for nullish input. */
+function formatEval(score) {
+  if (score == null || !Number.isFinite(score)) return "";
+  if (score === 0) return "0.0";
+  const sign = score > 0 ? "+" : "−";
+  return `${sign}${Math.abs(score).toFixed(1)}`;
+}
+
+// =====================================================================
 //  Game replay
 // =====================================================================
 
@@ -773,15 +935,48 @@ function replayPgn(pgn) {
   const matesAllowed   = new Array(positions.length).fill(null);
   const matesDelivered = new Array(positions.length).fill(null);
   const mateThreats    = new Array(positions.length).fill(null);
+  // Pin annotations mirror the fork ones: `pinsExecuted[i]` flags a
+  // move that was itself a winning pin the side-to-move already had,
+  // while `pinSuggestions[i]` lists the winning pins the side-to-move
+  // can play *at* positions[i] (forward-looking, like `mateThreats`).
+  // Compute pins once per position and reuse for both the executed
+  // lookup (vs. the previous position's pin list) and the forward
+  // suggestion array.
+  const pinsExecuted   = new Array(positions.length).fill(null);
+  const pinSuggestions = new Array(positions.length).fill(null);
+  const pinsAtPos = positions.map((p) => findPins(p));
+  for (let i = 0; i < positions.length; i++) {
+    if (pinsAtPos[i].length) pinSuggestions[i] = pinsAtPos[i];
+  }
+
+  // Per-position material evaluation (White's perspective, in pawn
+  // units) and per-move "you could have done better" suggestions.
+  //   * evals[i]       — evaluatePosition(positions[i])
+  //   * suggestions[i] — null unless the move that produced
+  //                      positions[i] scored materially worse than the
+  //                      best legal alternative in positions[i-1].
+  //                      When set: { best: <coord SAN>, lost: <pawns> }
+  const evals       = positions.map(evaluatePosition);
+  const suggestions = new Array(positions.length).fill(null);
+  // Only nag the player when they gave up at least this many pawns
+  // compared to the best legal move.  Below this threshold the gap is
+  // usually within noise of the (very crude) material-only evaluator.
+  const SUGGEST_THRESHOLD = 2;
+
   let prevForks = findForks(positions[0]);
   for (let i = 1; i < positions.length; i++) {
-    // Was the move just played one of the forks that were available?
+    // Was the move just played one of the forks/pins that were
+    // available in the previous position?
     const played = positions[i].lastMove;
     if (played) {
-      const executed = prevForks.find(
+      const executedFork = prevForks.find(
         (f) => f.move.from === played.from && f.move.to === played.to
       );
-      if (executed) goodMoves[i] = executed;
+      if (executedFork) goodMoves[i] = executedFork;
+      const executedPin = pinsAtPos[i - 1].find(
+        (p) => p.move.from === played.from && p.move.to === played.to
+      );
+      if (executedPin) pinsExecuted[i] = executedPin;
     }
 
     const here = findForks(positions[i]);
@@ -804,6 +999,24 @@ function replayPgn(pgn) {
       const mates = findMateInOne(positions[i]);
       if (mates.length) matesAllowed[i] = mates;
     }
+
+    // Suggestion: did a clearly better move exist in positions[i-1]?
+    // Compare the played move's material delta to bestMove()'s score.
+    // Skip when the move ended the game (mate) — there's nothing left
+    // to suggest at that point.
+    if (played && !matesDelivered[i]) {
+      const prev = positions[i - 1];
+      const playerIsWhite = prev.sideToMove === "w";
+      const playedScore = (evals[i] - evals[i - 1]) * (playerIsWhite ? 1 : -1);
+      const best = bestMove(prev);
+      if (best && best.score - playedScore >= SUGGEST_THRESHOLD) {
+        suggestions[i] = {
+          best: describeMoveCoord(prev, best.move),
+          score: best.score,
+          lost: best.score - playedScore,
+        };
+      }
+    }
   }
 
   // Forward-looking threat: at each position, what mate-in-one moves
@@ -815,7 +1028,13 @@ function replayPgn(pgn) {
     if (threats.length) mateThreats[i] = threats;
   }
 
-  return { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered, mateThreats };
+  return {
+    positions, sanList,
+    blunders, goodMoves,
+    matesAllowed, matesDelivered, mateThreats,
+    pinsExecuted, pinSuggestions,
+    evals, suggestions,
+  };
 }
 
 // =====================================================================
@@ -834,6 +1053,10 @@ const state = {
   matesAllowed: [],
   matesDelivered: [],
   mateThreats: [],
+  pinsExecuted: [],
+  pinSuggestions: [],
+  evals: [0],
+  suggestions: [null],
   ply: 0, // index into positions
   orientation: "w", // "w" = white at the bottom, "b" = black at the bottom
 };
@@ -1093,12 +1316,17 @@ function renderMoveList() {
         const good          = state.goodMoves[positionIdx];
         const mateAllowed   = state.matesAllowed?.[positionIdx];
         const mateDelivered = state.matesDelivered?.[positionIdx];
+        const pinExecuted   = state.pinsExecuted?.[positionIdx];
+        const suggestion    = state.suggestions?.[positionIdx];
+        const evalScore     = state.evals?.[positionIdx];
         let label = state.sanList[ply];
         // Precedence (most important first):
         //   1. mateDelivered — game-ending, definitely shown.
         //   2. mateAllowed   — usually losing, overrides fork blunder.
         //   3. blunder (fork)
         //   4. good (executed fork)
+        //   5. pinExecuted   — only badged when no fork already lit
+        //                      the move up.
         if (mateDelivered) {
           // Avoid double-#; some sanList entries already carry it.
           if (!label.endsWith("#")) label += "#";
@@ -1120,8 +1348,35 @@ function renderMoveList() {
           label += "!";
           span.classList.add("good");
           span.title = "Fork: " + describeFork(good);
+        } else if (pinExecuted) {
+          label += "!";
+          span.classList.add("good");
+          span.title = "Pin: " + describePin(pinExecuted);
         }
         span.textContent = label;
+        // Append the post-move evaluation as a dim suffix (e.g. " +0.5").
+        // Skip on mate moves — the score there is meaningless under a
+        // pure material evaluator.
+        if (evalScore != null && !mateDelivered && !mateAllowed) {
+          const evalSpan = document.createElement("span");
+          evalSpan.className = "eval";
+          if (evalScore > 0) evalSpan.classList.add("eval-pos");
+          else if (evalScore < 0) evalSpan.classList.add("eval-neg");
+          evalSpan.textContent = " " + formatEval(evalScore);
+          span.appendChild(evalSpan);
+        }
+        // If a clearly better move was available, mention it in the
+        // tooltip without overriding existing tactical annotations.
+        if (suggestion) {
+          const hint = `Better: ${suggestion.best} `
+            + `(${formatEval(suggestion.score)}, `
+            + `lost ${suggestion.lost.toFixed(1)} pawns)`;
+          span.title = span.title ? `${span.title} \u2014 ${hint}` : hint;
+          if (!span.classList.contains("blunder")
+              && !span.classList.contains("good")) {
+            span.classList.add("suggestion");
+          }
+        }
         span.dataset.ply = positionIdx;
         span.addEventListener("click", () => setPly(positionIdx));
       } else {
@@ -1165,28 +1420,35 @@ function renderMoveFeedback() {
   fb.className = "";
   fb.textContent = "";
   const idx = state.ply;
-  if (idx <= 0) { fb.hidden = true; return; }
-  const san = state.sanList[idx - 1];
-  const spoken = spokenSan(san);
-  const blunder       = state.blunders[idx];
-  const good          = state.goodMoves[idx];
+  if (idx <= 0) {
+    // Even at the starting position we may want to highlight that the
+    // side-to-move can immediately set up a pin. Fall through into the
+    // suggestion block below instead of bailing out unconditionally.
+    fb.hidden = true;
+  }
+  const san = idx > 0 ? state.sanList[idx - 1] : null;
+  const spoken = san ? spokenSan(san) : null;
+  const blunder       = idx > 0 ? state.blunders[idx]    : null;
+  const good          = idx > 0 ? state.goodMoves[idx]   : null;
   const mateAllowed   = state.matesAllowed?.[idx];
   const mateDelivered = state.matesDelivered?.[idx];
   const mateThreat    = state.mateThreats?.[idx];
+  const pinExecuted   = idx > 0 ? state.pinsExecuted?.[idx]   : null;
+  const pinSuggestion = state.pinSuggestions?.[idx];
   if (mateDelivered) {
     fb.hidden = false;
     fb.classList.add("good");
-    fb.textContent = `★ ${spoken} — checkmate!`;
+    fb.textContent = `\u2605 ${spoken} \u2014 checkmate!`;
   } else if (mateAllowed) {
     fb.hidden = false;
     fb.classList.add("blunder");
     const detail = mateAllowed
       .map((m) => describeMate(m, state.positions[idx]))
       .join("; ");
-    fb.textContent = `⚠ ${spoken} (??) — allows mate-in-one: ${detail}`;
+    fb.textContent = `\u26A0 ${spoken} (??) \u2014 allows mate-in-one: ${detail}`;
   } else if (mateThreat) {
     // Forward-looking warning shown *before* the player walks into a
-    // mate. The threatening side is whoever just moved — i.e. the
+    // mate. The threatening side is whoever just moved \u2014 i.e. the
     // opposite of the side-to-move in the current position.
     fb.hidden = false;
     fb.classList.add("blunder");
@@ -1196,16 +1458,29 @@ function renderMoveFeedback() {
       .map((m) => describeMate(m, state.positions[idx]))
       .join("; ");
     fb.textContent =
-      `⚠ Watch out — ${threatColor} threatens mate-in-one: ${detail}`;
+      `\u26A0 Watch out \u2014 ${threatColor} threatens mate-in-one: ${detail}`;
   } else if (blunder) {
     fb.hidden = false;
     fb.classList.add("blunder");
     const detail = blunder.map(describeFork).join("; ");
-    fb.textContent = `⚠ ${spoken} (??) — allows fork: ${detail}`;
+    fb.textContent = `\u26A0 ${spoken} (??) \u2014 allows fork: ${detail}`;
   } else if (good) {
     fb.hidden = false;
     fb.classList.add("good");
-    fb.textContent = `★ ${spoken} (!) — fork: ${describeFork(good)}`;
+    fb.textContent = `\u2605 ${spoken} (!) \u2014 fork: ${describeFork(good)}`;
+  } else if (pinExecuted) {
+    fb.hidden = false;
+    fb.classList.add("good");
+    fb.textContent = `\u2605 ${spoken} (!) \u2014 pin: ${describePin(pinExecuted)}`;
+  } else if (pinSuggestion) {
+    // Forward-looking hint: the side-to-move can play a winning pin
+    // right now. Only fires when no more-urgent annotation is active.
+    const sideWord =
+      state.positions[idx].sideToMove === "w" ? "White" : "Black";
+    const detail = pinSuggestion.map(describePin).join("; ");
+    fb.hidden = false;
+    fb.classList.add("good");
+    fb.textContent = `\u2605 ${sideWord} has a pin available: ${detail}`;
   } else {
     fb.hidden = true;
   }
@@ -1229,10 +1504,15 @@ function renderHangingWarning() {
   const pos = state.positions[idx];
   if (!pos) { panel.hidden = true; return; }
 
-  // Don't compete with mate warnings.
+  // Don't compete with mate warnings, and skip when the side to
+  // move is in check — the check itself is forcing and any "you
+  // could capture" / "you should defend" hint is misleading
+  // because most pieces can't legally move until the check is
+  // resolved.
   if (state.matesDelivered?.[idx]
       || state.matesAllowed?.[idx]
-      || state.mateThreats?.[idx]) {
+      || state.mateThreats?.[idx]
+      || inCheck(pos)) {
     panel.hidden = true;
     return;
   }
@@ -1645,11 +1925,14 @@ function renderForkArrows() {
   const mateAllowed   = state.matesAllowed?.[idx];
   const mateDelivered = state.matesDelivered?.[idx];
   const mateThreat    = state.mateThreats?.[idx];
+  const pinExecuted   = state.ply > 0 ? state.pinsExecuted?.[idx]   : null;
+  const pinSuggestion = state.pinSuggestions?.[idx];
 
   // Build a list of "shapes" to draw. Each shape has a colour class
-  // ("blunder" / "good") and either:
-  //   * a `fork` with `.move.{from,to}` + `.targets[]`, or
-  //   * a `mate` with `.move.{from,to}` (no targets).
+  // ("blunder" / "good") and one of:
+  //   * a `fork` with `.move.{from,to}` + `.targets[]`,
+  //   * a `mate` with `.move.{from,to}` (no targets), or
+  //   * a `pin`  with `.move.{from,to}` + `.pinnedSquare` + `.behindSquare`.
   const shapes = [];
   if (mateDelivered) {
     // Don't draw anything for delivered mate — too late to learn from
@@ -1668,6 +1951,14 @@ function renderForkArrows() {
     for (const f of blunder) shapes.push({ kind: "fork", fork: f, cls: "blunder" });
   } else if (good) {
     shapes.push({ kind: "fork", fork: good, cls: "good" });
+  } else if (pinExecuted) {
+    shapes.push({ kind: "pin", pin: pinExecuted, cls: "good" });
+  } else if (pinSuggestion) {
+    // Prospective hint: dashed arrow on the suggested move + solid
+    // arrow through the pinned piece to the back piece.
+    for (const p of pinSuggestion) {
+      shapes.push({ kind: "pin", pin: p, cls: "good", suggested: true });
+    }
   }
   if (!shapes.length) return;
 
@@ -1720,6 +2011,42 @@ function renderForkArrows() {
       });
       line.setAttribute("class", `fork-arrow-${cls}`);
       svg.appendChild(line);
+      continue;
+    }
+
+    if (shape.kind === "pin") {
+      // For a prospective pin suggestion we also draw the dashed
+      // from→to so the player can see *which* move to make. For an
+      // already-played pin, the last-move highlight already shows it.
+      const fromC   = center(shape.pin.move.from);
+      const toC     = center(shape.pin.move.to);
+      const pinnedC = center(shape.pin.pinnedSquare);
+      const behindC = center(shape.pin.behindSquare);
+      if (shape.suggested) {
+        const tip = shorten(fromC, toC, 0.25);
+        const mv = svgEl("line", {
+          x1: fromC.x, y1: fromC.y, x2: tip.x, y2: tip.y,
+          "stroke-width": "0.13",
+          "marker-end": `url(#fa-head-${cls})`,
+        });
+        mv.setAttribute("class", `fork-move-${cls}`);
+        svg.appendChild(mv);
+      }
+      // A single arrow from the attacker square straight through to
+      // the back piece visualises the pin axis. The arrowhead lands
+      // on the shielded back piece; the pinned piece sits along the
+      // line, which the player can read directly off the board.
+      const tip = shorten(toC, behindC, 0.32);
+      const ray = svgEl("line", {
+        x1: toC.x, y1: toC.y, x2: tip.x, y2: tip.y,
+        "stroke-width": "0.13",
+        "marker-end": `url(#fa-head-${cls})`,
+      });
+      ray.setAttribute("class", `fork-arrow-${cls}`);
+      svg.appendChild(ray);
+      // Suppress unused-var warning for pinnedC while leaving it
+      // available for future enhancements (e.g. a midpoint marker).
+      void pinnedC;
       continue;
     }
 
@@ -1835,8 +2162,13 @@ function selectGame(idx) {
   const g = state.games[idx];
   if (!g) return;
 
-  const { positions, sanList, blunders, goodMoves, matesAllowed, matesDelivered, mateThreats }
-    = replayPgn(g.pgn || "");
+  const {
+    positions, sanList,
+    blunders, goodMoves,
+    matesAllowed, matesDelivered, mateThreats,
+    pinsExecuted, pinSuggestions,
+    evals, suggestions,
+  } = replayPgn(g.pgn || "");
   state.positions = positions;
   state.sanList = sanList;
   state.blunders = blunders;
@@ -1844,6 +2176,10 @@ function selectGame(idx) {
   state.matesAllowed = matesAllowed;
   state.matesDelivered = matesDelivered;
   state.mateThreats = mateThreats;
+  state.pinsExecuted = pinsExecuted;
+  state.pinSuggestions = pinSuggestions;
+  state.evals = evals;
+  state.suggestions = suggestions;
   state.ply = 0;
 
   // Orient the board so the queried player is always at the bottom.
@@ -2150,6 +2486,8 @@ function makeUserMove(from, to, promotion) {
   state.matesAllowed   = state.matesAllowed.slice(0, state.ply + 1);
   state.matesDelivered = state.matesDelivered.slice(0, state.ply + 1);
   state.mateThreats    = state.mateThreats.slice(0, state.ply + 1);
+  state.evals          = state.evals.slice(0, state.ply + 1);
+  state.suggestions    = state.suggestions.slice(0, state.ply + 1);
 
   state.positions.push(next);
   state.sanList.push(moveObj.san + (delivered ? "#" : ""));
@@ -2158,6 +2496,28 @@ function makeUserMove(from, to, promotion) {
   state.matesAllowed.push(allowed && allowed.length ? allowed : null);
   state.matesDelivered.push(delivered);
   state.mateThreats.push(threats && threats.length ? threats : null);
+
+  // Evaluation + best-move suggestion for the move just played.
+  // Compare the played material delta to bestMove() in the previous
+  // position; flag a suggestion when the gap is at least 2 pawns.
+  const prevPos = state.positions[state.positions.length - 2];
+  const prevEval = state.evals[state.evals.length - 1];
+  const newEval = evaluatePosition(next);
+  state.evals.push(newEval);
+  let suggestion = null;
+  if (!delivered) {
+    const playerIsWhite = prevPos.sideToMove === "w";
+    const playedScore = (newEval - prevEval) * (playerIsWhite ? 1 : -1);
+    const best = bestMove(prevPos);
+    if (best && best.score - playedScore >= 2) {
+      suggestion = {
+        best: describeMoveCoord(prevPos, best.move),
+        score: best.score,
+        lost: best.score - playedScore,
+      };
+    }
+  }
+  state.suggestions.push(suggestion);
 
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
@@ -2243,6 +2603,8 @@ function resetFreePlay() {
   state.matesAllowed = [null];
   state.matesDelivered = [null];
   state.mateThreats = [null];
+  state.evals = [evaluatePosition(state.positions[0])];
+  state.suggestions = [null];
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
   els.gameTitle.textContent = "Free play — click pieces to move";
@@ -2279,6 +2641,8 @@ function init() {
   state.matesAllowed = [null];
   state.matesDelivered = [null];
   state.mateThreats = [null];
+  state.evals = [evaluatePosition(state.positions[0])];
+  state.suggestions = [null];
   setPly(0);
   updateFreePlayChrome();
 

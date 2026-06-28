@@ -502,6 +502,157 @@ def _swap_side(pos: Position) -> Position:
 
 
 # ---------------------------------------------------------------------------
+#  Pin detection
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Pin:
+    """A pin created by `move`.
+
+    `attacker_square` is where the pinning piece lands. `pinned_square`
+    holds the enemy piece that can't move without exposing
+    `behind_square` (a more valuable enemy piece, or the king if
+    `absolute` is True).
+    """
+    move: Move
+    attacker_square: int
+    pinned_square: int
+    pinned_piece: str
+    behind_square: int
+    behind_piece: str
+    absolute: bool
+
+
+# Sliding directions per pinning piece type. A queen pins along any
+# of the eight rays; bishop/rook only along their own.
+_PIN_DIRS = {
+    "B": BISHOP_DIRS,
+    "R": ROOK_DIRS,
+    "Q": BISHOP_DIRS + ROOK_DIRS,
+}
+
+
+def find_pins(pos: Position) -> list:
+    """Return every legal move for `pos.stm` that creates a *winning* pin.
+
+    Definition used here:
+      1. The moving piece is a bishop, rook, or queen.
+      2. After the move, a ray matching the attacker's piece type
+         passes through exactly one enemy piece (the "pinned" piece —
+         never the king itself, which would be check) and then hits a
+         second enemy piece on the same ray with no friendly piece in
+         between.
+      3. The second piece is either the king (absolute pin) or
+         strictly more valuable than the pinned piece (relative pin
+         that wins material if the pinned piece moves).
+      4. The attacker's landing square is not attacked by the
+         opponent — same rule as :func:`find_forks`, so the pinning
+         piece can't simply be captured back.
+      5. Capturing the pinned piece next move actually wins
+         material: the pinned piece must be either *undefended* or
+         strictly more valuable than the pinning piece. Without this
+         filter the detector flagged dozens of cosmetic pins per
+         position (e.g. Qd1–h5 "pinning" f7 to the king, where the
+         only follow-up is Qxf7 — losing the queen for a pawn).
+
+    Suggestions are de-duplicated by (from, to): a queen creating
+    two pins from one square is reported as a single move with one
+    `Pin` entry per pin axis.
+    """
+    pins = []
+    attacker_is_white = pos.stm == "w"
+    for m in legal_moves(pos):
+        # The moving piece must be a sliding pinner — a promotion to
+        # B/R/Q also qualifies, so check the post-move piece.
+        nxt = make_move(pos, m)
+        attacker_sq = m.to
+        attacker = nxt.board[attacker_sq]
+        if not attacker or attacker.upper() not in _PIN_DIRS:
+            continue
+        # (4) — landing square must be safe.
+        if is_attacked_by(nxt.board, attacker_sq, by_white=not attacker_is_white):
+            continue
+
+        f0, r0 = file_of(attacker_sq), rank_of(attacker_sq)
+        for df, dr in _PIN_DIRS[attacker.upper()]:
+            f, r = f0 + df, r0 + dr
+            first = None  # (square, piece) of the first enemy on the ray
+            while 0 <= f < 8 and 0 <= r < 8:
+                s = sq(f, r)
+                p = nxt.board[s]
+                if p:
+                    own = (p.isupper() == attacker.isupper())
+                    if first is None:
+                        if own:
+                            break  # blocked by our own piece — no pin here
+                        if p.upper() == "K":
+                            break  # that's a check, not a pin
+                        first = (s, p)
+                    else:
+                        if own:
+                            break  # friendly piece shields the back rank
+                        front_sq, front_p = first
+                        front_val = PIECE_VALUE[front_p.upper()]
+                        back_val  = PIECE_VALUE[p.upper()]
+                        absolute  = p.upper() == "K"
+                        # (3) — back piece must be the king or more valuable.
+                        if not absolute and back_val <= front_val:
+                            break
+                        # (5) — taking the pinned piece must win material.
+                        if not _pin_wins_material(
+                                nxt.board, attacker_sq, front_sq,
+                                attacker_is_white):
+                            break
+                        pins.append(Pin(
+                            move=m, attacker_square=attacker_sq,
+                            pinned_square=front_sq, pinned_piece=front_p,
+                            behind_square=s, behind_piece=p,
+                            absolute=absolute,
+                        ))
+                        break  # ray is finished either way
+                f += df
+                r += dr
+    return pins
+
+
+def _pin_wins_material(board: list, attacker_sq: int, pinned_sq: int,
+                       attacker_is_white: bool) -> bool:
+    """Quick SEE-lite: would capturing the pinned piece net material?
+
+    Returns True when either:
+      * the pinned piece has no defenders (free capture next move),
+        or
+      * the pinned piece is strictly more valuable than the pinning
+        piece (so even after the recapture we come out ahead).
+
+    This intentionally ignores deeper exchange sequences and x-ray
+    reveals — a Ruy-López-style ``Bb5`` pin won't be flagged because
+    it doesn't *immediately* win material, which is the whole point
+    of the filter: only surface pins the player can cash in on.
+    """
+    attacker_val = PIECE_VALUE[board[attacker_sq].upper()]
+    pinned_val   = PIECE_VALUE[board[pinned_sq].upper()]
+    defenders = find_attackers(board, pinned_sq,
+                               by_white=not attacker_is_white)
+    return not defenders or pinned_val > attacker_val
+
+
+def describe_pins(pins) -> list:
+    """Cheap human-readable rendering for assertion messages."""
+    return [
+        {
+            "move": p.move.uci(),
+            "from": sq_name(p.move.frm),
+            "to":   sq_name(p.move.to),
+            "pinned":   sq_name(p.pinned_square),
+            "behind":   sq_name(p.behind_square),
+            "absolute": p.absolute,
+        }
+        for p in pins
+    ]
+
+
+# ---------------------------------------------------------------------------
 #  Checkmate detection
 # ---------------------------------------------------------------------------
 
@@ -622,4 +773,67 @@ def find_hanging_pieces(pos: Position, color: Optional[str] = None) -> list:
                 "defenders": defenders,
             })
     return out
+
+
+# ---------------------------------------------------------------------------
+#  Material evaluation
+# ---------------------------------------------------------------------------
+#
+# The simplest possible position evaluator: sum the value of every
+# non-king piece on the board, signed by color.  This is enough to spot
+# blunders that lose material outright (hanging a queen, bad trades) and
+# to suggest the move that wins the most material in the current
+# position.  See ``best_move`` below.
+#
+# Kings are excluded because both sides always have exactly one — they
+# contribute equally to every position and so cancel out.
+
+# Values in pawn units.  Identical to ``PIECE_VALUE`` except the king
+# is dropped; kept as a separate table to make that intent explicit.
+_EVAL_VALUES = {"P": 1, "N": 3, "B": 3, "R": 5, "Q": 9}
+
+
+def evaluate(pos: Position) -> int:
+    """Material balance of ``pos`` from White's perspective, in pawn units.
+
+    Positive means White is ahead, negative means Black is ahead.
+    """
+    score = 0
+    for p in pos.board:
+        if not p:
+            continue
+        v = _EVAL_VALUES.get(p.upper())
+        if v is None:
+            continue
+        score += v if p.isupper() else -v
+    return score
+
+
+def score_move(pos: Position, move: Move) -> int:
+    """Material gained by ``move`` from the perspective of the side to move.
+
+    Positive = good for the mover, negative = loses material.  This is
+    simply the change in :func:`evaluate` produced by playing the move,
+    flipped for Black so "higher is better for me" always holds.
+    """
+    delta = evaluate(make_move(pos, move)) - evaluate(pos)
+    return delta if pos.stm == "w" else -delta
+
+
+def best_move(pos: Position):
+    """Return ``(move, score)`` for the highest-scoring legal move.
+
+    Ties are broken by the order ``legal_moves`` produces.  Returns
+    ``None`` when the side to move has no legal moves (checkmate or
+    stalemate).
+    """
+    best = None
+    best_score = None
+    for mv in legal_moves(pos):
+        s = score_move(pos, mv)
+        if best_score is None or s > best_score:
+            best, best_score = mv, s
+    if best is None:
+        return None
+    return best, best_score
 

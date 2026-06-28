@@ -417,6 +417,20 @@ body.games-collapsed main {
 #move-list .ply.blunder.active { color: white; background: var(--loss); }
 #move-list .ply.good    { color: var(--win);  font-weight: 600; cursor: help; }
 #move-list .ply.good.active    { color: #0b2d12; background: var(--win); }
+#move-list .ply.suggestion { cursor: help; }
+#move-list .ply.suggestion::after {
+  content: " \2022"; /* dim bullet hint that a tooltip is available */
+  color: var(--muted);
+  margin-left: 0.15rem;
+}
+#move-list .ply .eval {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+  margin-left: 0.15rem;
+  font-variant-numeric: tabular-nums;
+}
+#move-list .ply.active .eval { color: rgba(255, 255, 255, 0.75); }
 
 #move-feedback {
   position: relative;
