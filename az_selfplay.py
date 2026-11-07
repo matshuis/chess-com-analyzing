@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
+from dataclasses import dataclass
 
 import chess
 import numpy as np
@@ -11,6 +13,26 @@ from az_chess import encode_position
 from az_mcts import MCTS, choose_move, visit_policy
 from az_network import ChessNet
 from az_replay import TrainingExample
+
+
+@dataclass(frozen=True)
+class GameResult:
+    plies: int
+    result: str
+    reason: str
+    move_cap: bool
+    white_score: float
+
+
+def _game_result(board: chess.Board) -> GameResult:
+    outcome = board.outcome(claim_draw=True)
+    return GameResult(
+        plies=len(board.move_stack),
+        result=outcome.result() if outcome else "1/2-1/2",
+        reason=outcome.termination.name.lower() if outcome else "move_cap",
+        move_cap=outcome is None,
+        white_score=_white_result(board),
+    )
 
 
 def _white_result(board: chess.Board) -> float:
@@ -27,6 +49,7 @@ def self_play_game(
     device: torch.device | str = "cpu",
     temperature_moves: int = 30,
     rng: random.Random | None = None,
+    on_game_end: Callable[[GameResult], None] | None = None,
 ) -> list[TrainingExample]:
     if max_plies < 1 or temperature_moves < 0:
         raise ValueError("max_plies must be positive and temperature_moves non-negative")
@@ -52,7 +75,10 @@ def self_play_game(
         records.append((state, actions, probabilities, board.turn))
         board.push(move)
 
-    result = 0.0 if not board.is_game_over(claim_draw=True) else _white_result(board)
+    game_result = _game_result(board)
+    if on_game_end is not None:
+        on_game_end(game_result)
+    result = game_result.white_score
     return [
         TrainingExample(
             state=state,
@@ -71,10 +97,13 @@ def evaluate_match(
     simulations: int,
     max_plies: int = 256,
     device: torch.device | str = "cpu",
+    on_game_end: Callable[[GameResult], None] | None = None,
 ) -> float:
     """Return candidate's score per game (win=1, draw=.5, loss=0)."""
     if games < 1:
         raise ValueError("games must be at least one")
+    if max_plies < 1:
+        raise ValueError("max_plies must be positive")
     candidate_search = MCTS(candidate, device=device)
     incumbent_search = MCTS(incumbent, device=device)
     score = 0.0
@@ -93,7 +122,10 @@ def evaluate_match(
                 break
             board.push(choose_move(visits, temperature=0.0))
 
-        result = _white_result(board) if board.is_game_over(claim_draw=True) else 0.0
+        game_result = _game_result(board)
+        if on_game_end is not None:
+            on_game_end(game_result)
+        result = game_result.white_score
         candidate_result = result if candidate_is_white else -result
         score += (candidate_result + 1.0) / 2.0
     return score / games

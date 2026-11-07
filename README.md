@@ -249,5 +249,13 @@ the full pipeline but is not a meaningful strength run.
 
 Useful monitoring includes positions/second, completed games/hour, policy and
 value loss, replay size, promotion score, GPU memory, and temperature.
+Training logs report self-play results and ending reasons, followed by a
+white-wins/black-wins/draws summary. Evaluation logs report each game's
+candidate-relative outcome and color, plies, result, and ending reason,
+then total wins/draws/losses, move-cap games, score, and promotion threshold.
+`reason=move_cap` identifies an unfinished game scored as a draw; move-cap
+games are included in draw totals. A natural ending on the final allowed
+ply (such as checkmate) is not counted as a move-cap draw. The logging does
+not change targets or promotion rules.
 Checkpoint/replay files can grow over time, so preserve `champion.pt` and
 `replay.npz` together when backing up a run.

@@ -12,7 +12,7 @@ import torch
 
 from az_network import ChessNet
 from az_replay import ReplayBuffer
-from az_selfplay import evaluate_match, self_play_game
+from az_selfplay import GameResult, evaluate_match, self_play_game
 from az_training import train_network
 
 
@@ -124,6 +124,7 @@ def main() -> int:
     )
     for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
         rng = random.Random(args.seed + iteration)
+        self_play_results: list[GameResult] = []
         for game_number in range(args.games_per_iteration):
             examples = self_play_game(
                 model,
@@ -131,14 +132,23 @@ def main() -> int:
                 max_plies=args.max_plies,
                 device=device,
                 rng=rng,
+                on_game_end=self_play_results.append,
             )
             for example in examples:
                 replay.add(example)
             print(
                 f"iteration {iteration} game {game_number + 1}/"
                 f"{args.games_per_iteration}: {len(examples)} positions; "
-                f"replay={len(replay):,}"
+                f"replay={len(replay):,}; result={self_play_results[-1].result}; "
+                f"reason={self_play_results[-1].reason}"
             )
+        print(
+            f"iteration {iteration} self-play summary: "
+            f"white_wins={sum(game.white_score > 0 for game in self_play_results)}, "
+            f"black_wins={sum(game.white_score < 0 for game in self_play_results)}, "
+            f"draws={sum(game.white_score == 0 for game in self_play_results)} "
+            f"(move_cap={sum(game.move_cap for game in self_play_results)})"
+        )
 
         effective_batch = min(args.batch_size, len(replay))
         policy_loss, value_loss = train_network(
@@ -150,6 +160,23 @@ def main() -> int:
             learning_rate=args.learning_rate,
             rng=rng,
         )
+        evaluation_results: list[float] = []
+        evaluation_move_caps = 0
+
+        def log_evaluation(game: GameResult) -> None:
+            nonlocal evaluation_move_caps
+            candidate_is_white = len(evaluation_results) % 2 == 0
+            candidate_result = game.white_score if candidate_is_white else -game.white_score
+            evaluation_results.append(candidate_result)
+            evaluation_move_caps += int(game.move_cap)
+            verdict = "win" if candidate_result > 0 else "loss" if candidate_result < 0 else "draw"
+            print(
+                f"iteration {iteration} evaluation game {len(evaluation_results)}/"
+                f"{args.eval_games}: candidate={verdict}; "
+                f"color={'white' if candidate_is_white else 'black'}; "
+                f"plies={game.plies}; result={game.result}; reason={game.reason}"
+            )
+
         score = evaluate_match(
             model,
             incumbent,
@@ -157,6 +184,15 @@ def main() -> int:
             simulations=args.eval_simulations,
             max_plies=args.max_plies,
             device=device,
+            on_game_end=log_evaluation,
+        )
+        print(
+            f"iteration {iteration} evaluation summary: "
+            f"wins={sum(result > 0 for result in evaluation_results)}, "
+            f"draws={sum(result == 0 for result in evaluation_results)}, "
+            f"losses={sum(result < 0 for result in evaluation_results)}; "
+            f"move_cap={evaluation_move_caps}; candidate_score={score:.3f}; "
+            f"promotion_threshold={args.promotion_score:.3f}"
         )
         promoted = score >= args.promotion_score
         if promoted:
