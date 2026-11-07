@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import copy
 import random
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
 import torch
 
 from az_network import ChessNet
+from az_parallel import ParallelGames
 from az_replay import ReplayBuffer
 from az_selfplay import GameResult, evaluate_match, self_play_game
 from az_training import train_network
@@ -74,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--games-per-iteration", type=int, default=8)
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="CPU game workers sharing batched inference (default: 1, sequential)",
+    )
     parser.add_argument("--simulations", type=int, default=48)
     parser.add_argument("--eval-games", type=int, default=4)
     parser.add_argument("--eval-simulations", type=int, default=32)
@@ -97,10 +103,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    with ExitStack() as stack:
+        return _main(stack)
+
+
+def _main(stack: ExitStack) -> int:
     args = build_parser().parse_args()
     positive_values = {
         "iterations": args.iterations,
         "games-per-iteration": args.games_per_iteration,
+        "workers": args.workers,
         "simulations": args.simulations,
         "eval-games": args.eval_games,
         "eval-simulations": args.eval_simulations,
@@ -181,21 +193,35 @@ def main() -> int:
 
     print(
         f"Training on {device}; network={args.blocks}x{args.channels}, "
-        f"replay capacity={args.buffer_size:,}"
+        f"replay capacity={args.buffer_size:,}; workers={args.workers}"
+    )
+    pool = (
+        stack.enter_context(ParallelGames(model, incumbent, args.workers, device))
+        if args.workers > 1 else None
     )
     for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
         rng = random.Random(args.seed + iteration)
         self_play_results: list[GameResult] = []
+        parallel_results = (
+            pool.self_play(
+                args.games_per_iteration, args.simulations, args.max_plies,
+                args.temperature_moves, (args.seed + iteration) * args.games_per_iteration,
+            ) if pool is not None else iter(())
+        )
         for game_number in range(args.games_per_iteration):
-            examples = self_play_game(
-                model,
-                simulations=args.simulations,
-                max_plies=args.max_plies,
-                device=device,
-                temperature_moves=args.temperature_moves,
-                rng=rng,
-                on_game_end=self_play_results.append,
-            )
+            if pool is None:
+                examples = self_play_game(
+                    model,
+                    simulations=args.simulations,
+                    max_plies=args.max_plies,
+                    device=device,
+                    temperature_moves=args.temperature_moves,
+                    rng=rng,
+                    on_game_end=self_play_results.append,
+                )
+            else:
+                examples, ending = next(parallel_results)
+                self_play_results.append(ending)
             for example in examples:
                 replay.add(example)
             print(
@@ -242,15 +268,20 @@ def main() -> int:
                 f"; opening={' '.join(game.opening) or 'start position'}"
             )
 
-        score = evaluate_match(
-            model,
-            incumbent,
-            games=args.eval_games,
-            simulations=args.eval_simulations,
-            max_plies=args.max_plies,
-            device=device,
-            on_game_end=log_evaluation,
-        )
+        if pool is None:
+            score = evaluate_match(
+                model,
+                incumbent,
+                games=args.eval_games,
+                simulations=args.eval_simulations,
+                max_plies=args.max_plies,
+                device=device,
+                on_game_end=log_evaluation,
+            )
+        else:
+            score = pool.evaluate(
+                args.eval_games, args.eval_simulations, args.max_plies, log_evaluation,
+            )
         print(
             f"iteration {iteration} evaluation summary: "
             f"wins={sum(result > 0 for result in evaluation_results)}, "

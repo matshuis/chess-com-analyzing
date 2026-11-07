@@ -39,8 +39,7 @@ def train_network(
         scaler = torch.amp.GradScaler(
             "cuda", enabled=target_device.type == "cuda"
         )
-    policy_total = 0.0
-    value_total = 0.0
+    totals = torch.zeros(2, device=target_device, dtype=torch.float64)
 
     for _ in range(steps):
         states, policy_targets, outcomes = replay.batch(batch_size, rng)
@@ -60,8 +59,8 @@ def train_network(
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        policy_total += float(policy_loss.detach().item())
-        value_total += float(value_loss.detach().item())
+        totals += torch.stack((policy_loss.detach(), value_loss.detach())).to(torch.float64)
 
     model.eval()
-    return policy_total / steps, value_total / steps
+    policy_mean, value_mean = (totals / steps).tolist()
+    return policy_mean, value_mean

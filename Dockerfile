@@ -9,7 +9,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-dev --no-cache
 
-COPY az_chess.py az_network.py az_mcts.py az_replay.py az_selfplay.py az_training.py train.py ./
+COPY az_chess.py az_network.py az_mcts.py az_parallel.py az_replay.py az_selfplay.py az_training.py train.py ./
 RUN mkdir -p /app/runs && chown 1000:1000 /app/runs
 USER 1000:1000
 

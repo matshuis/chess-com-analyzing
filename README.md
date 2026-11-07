@@ -122,6 +122,35 @@ The setting must be non-negative and affects only self-play: evaluation
 remains deterministic without exploration noise. Self-play still adds root
 exploration noise on every searched move, including after the sampling window.
 
+### Faster self-play and evaluation
+
+Use `--workers 8` to run games on eight CPU processes while the trainer batches
+their inference requests on one GPU. Start with four workers if RAM is limited;
+each worker imports PyTorch but does not load network weights or create a CUDA
+context. Workers stay alive across iterations, and optimizer training still
+runs on the trainer's GPU. For example:
+
+```bash
+uv run train.py --device auto --iterations 5 \
+  --workers 8 --games-per-iteration 32 --simulations 64 \
+  --temperature-moves 60 --eval-games 20 --eval-simulations 128 \
+  --train-steps 100 --batch-size 128
+```
+
+The default `--workers 1` retains sequential execution. Parallel mode keeps
+simulation budgets, draw rules, sampling windows, and paired evaluation
+openings unchanged. Evaluation pairs run on separate workers; results are
+reported in their original order. Self-play uses independent per-game random
+seeds, so it does not reproduce the sequential mode's exact games. Batched
+GPU arithmetic can also introduce small numerical differences in move choices.
+Worker failures abort training explicitly, and workers are stopped on exit.
+The pool also works on CPU, although speedup depends on the hardware and
+workload. More workers are not always faster: benchmark four and eight, and
+watch RAM usage. Startup and short games can outweigh the batching benefit.
+Increasing `--batch-size` separately may improve optimizer throughput if GPU
+memory permits, but changes the training experiment; it is not required for
+parallel game generation.
+
 ### Training in Docker
 
 The training-only image includes PyTorch 2.7.1 with CUDA 12.8, plus the
@@ -183,8 +212,8 @@ Using `--device cuda` deliberately fails if GPU access is unavailable rather
 than quietly training on CPU. Checkpoints are saved at iteration boundaries;
 interrupting midway through an iteration loses its unsaved progress.
 Rebuild the image after changing training code or dependencies. The image is
-large because it includes the CUDA runtime; it does not change the current
-sequential MCTS throughput limitations.
+large because it includes the CUDA runtime. Pass `--workers 8` to enable
+parallel games and batched inference inside the container as well.
 
 ### Play against your champion
 

@@ -10,7 +10,6 @@ import numpy as np
 import torch
 
 from az_chess import encode_move, encode_position
-from az_network import ChessNet
 
 
 @dataclass
@@ -29,7 +28,7 @@ class Node:
 class MCTS:
     def __init__(
         self,
-        model: ChessNet,
+        model: torch.nn.Module,
         device: torch.device | str = "cpu",
         c_puct: float = 1.5,
         dirichlet_alpha: float = 0.3,
@@ -48,7 +47,6 @@ class MCTS:
     def _predict(self, board: chess.Board) -> tuple[dict[chess.Move, float], float]:
         encoded = torch.from_numpy(encode_position(board)).unsqueeze(0)
         encoded = encoded.to(self.device)
-        self.model.eval()
         with torch.inference_mode():
             logits, value = self.model(encoded)
         logits_np = logits[0].float().cpu().numpy()
@@ -98,6 +96,7 @@ class MCTS:
         if board.is_game_over(claim_draw=True):
             return {}
 
+        self.model.eval()
         root = Node(1.0)
         self._expand(root, board)
         if add_root_noise and root.children:
@@ -115,15 +114,17 @@ class MCTS:
             state = board.copy(stack=True)
             node = root
             path = [node]
+            outcome = None
 
             while node.expanded and node.children:
                 move, node = self._select_child(node)
                 state.push(move)
                 path.append(node)
-                if state.is_game_over(claim_draw=True):
+                outcome = state.outcome(claim_draw=True)
+                if outcome is not None:
                     break
 
-            if state.is_game_over(claim_draw=True):
+            if outcome is not None:
                 value = self._terminal_value(state)
             else:
                 value = self._expand(node, state)

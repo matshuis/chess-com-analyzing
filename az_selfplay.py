@@ -11,7 +11,6 @@ import torch
 
 from az_chess import encode_position
 from az_mcts import MCTS, choose_move, visit_policy
-from az_network import ChessNet
 from az_replay import TrainingExample
 
 
@@ -60,7 +59,7 @@ def _white_result(board: chess.Board) -> float:
 
 
 def self_play_game(
-    model: ChessNet,
+    model: torch.nn.Module,
     simulations: int,
     max_plies: int = 256,
     device: torch.device | str = "cpu",
@@ -108,8 +107,8 @@ def self_play_game(
 
 
 def evaluate_match(
-    candidate: ChessNet,
-    incumbent: ChessNet,
+    candidate: torch.nn.Module,
+    incumbent: torch.nn.Module,
     games: int,
     simulations: int,
     max_plies: int = 256,

@@ -24,6 +24,7 @@ class ReplayBuffer:
         if capacity < 1:
             raise ValueError("capacity must be positive")
         self._examples: deque[TrainingExample] = deque(maxlen=capacity)
+        self._sample_pool: list[TrainingExample] | None = None
 
     def __len__(self) -> int:
         return len(self._examples)
@@ -53,11 +54,14 @@ class ReplayBuffer:
                 float(example.outcome),
             )
         )
+        self._sample_pool = None
 
     def sample(self, batch_size: int, rng: random.Random | None = None) -> list[TrainingExample]:
         if not 1 <= batch_size <= len(self):
             raise ValueError(f"batch_size must be between 1 and {len(self)}")
-        return (rng or random).sample(list(self._examples), batch_size)
+        if self._sample_pool is None:
+            self._sample_pool = list(self._examples)
+        return (rng or random).sample(self._sample_pool, batch_size)
 
     def save(self, path: str | Path) -> None:
         target = Path(path)
