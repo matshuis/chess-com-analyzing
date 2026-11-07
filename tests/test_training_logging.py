@@ -1,5 +1,6 @@
 """Game ending and training log regression tests."""
 import sys
+import chess.pgn
 
 import pytest
 
@@ -94,6 +95,19 @@ def test_training_prints_draw_and_move_cap_summaries(
     assert "promotion_threshold=0.550" in log
     assert "Kept incumbent" in log
     assert (tmp_path / "champion.pt").exists()
+    records_dir = tmp_path / "games" / "iteration-000001"
+    assert len(list(records_dir.glob("*.pgn"))) == 3
+    for name, plies, white in [
+        ("selfplay-001.pgn", 2, "Learner"),
+        ("evaluation-001.pgn", 6, "Candidate"),
+        ("evaluation-002.pgn", 6, "Champion"),
+    ]:
+        with (records_dir / name).open() as handle:
+            game = chess.pgn.read_game(handle)
+        assert game is not None and not game.errors
+        assert len(list(game.mainline_moves())) == plies
+        assert game.headers["White"] == white
+        assert game.headers["Iteration"] == "1"
 
 
 def test_training_rejects_negative_sampling_window(tmp_path, monkeypatch):

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import chess
+import chess.pgn
 import numpy as np
 import torch
 
@@ -37,17 +38,60 @@ class GameResult:
     move_cap: bool
     white_score: float
     opening: tuple[str, ...] = ()
+    pgn: str = ""
 
 
 def _game_result(board: chess.Board, opening: tuple[str, ...] = ()) -> GameResult:
     outcome = board.outcome(claim_draw=True)
+    result = outcome.result() if outcome else "1/2-1/2"
+    reason = outcome.termination.name.lower() if outcome else "move_cap"
+    game = chess.pgn.Game()
+    position = board.root()
+    game.setup(position)
+    game.headers["Result"] = result
+    game.headers["Termination"] = "normal" if outcome else "adjudication"
+    game.headers["TerminationReason"] = reason
+    game.headers["FinalFEN"] = board.fen()
+    game.headers["PlyCount"] = str(len(board.move_stack))
+    game.headers["OpeningMoves"] = " ".join(opening)
+    seen: dict[tuple[str, ...], list[int]] = {
+        tuple(position.fen().split()[:4]): [0],
+    }
+    node: chess.pgn.GameNode = game
+    for ply, move in enumerate(board.move_stack, start=1):
+        position.push(move)
+        node = node.add_variation(move)
+        key = tuple(position.fen().split()[:4])
+        previous_plies = seen.setdefault(key, [])
+        if previous_plies:
+            node.comment = (
+                "Position occurrence "
+                f"{len(previous_plies) + 1}; previously seen after plies "
+                + ", ".join(map(str, previous_plies)) + " (0 = initial position)."
+            )
+        previous_plies.append(ply)
+    ending_note = f"Game ended: {reason}."
+    if reason == "threefold_repetition" and not board.is_repetition(3):
+        claim_moves = []
+        for move in list(position.legal_moves):
+            san = position.san(move)
+            position.push(move)
+            if position.is_repetition(3):
+                claim_moves.append(f"{san} ({move.uci()})")
+            position.pop()
+        ending_note += (
+            " Threefold repetition is claimable by announcing "
+            + ", ".join(claim_moves) + "; these moves were not played."
+        )
+    node.comment = f"{node.comment} {ending_note}".strip()
     return GameResult(
         plies=len(board.move_stack),
-        result=outcome.result() if outcome else "1/2-1/2",
-        reason=outcome.termination.name.lower() if outcome else "move_cap",
+        result=result,
+        reason=reason,
         move_cap=outcome is None,
         white_score=_white_result(board),
         opening=opening,
+        pgn=game.accept(chess.pgn.StringExporter(headers=True, variations=False, comments=True)),
     )
 
 

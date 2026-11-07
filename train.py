@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import random
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+import chess.pgn
 import torch
 
 from az_network import ChessNet
@@ -100,6 +103,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/az"))
     return parser
+
+
+def _save_game(
+    path: Path, result: GameResult, headers: dict[str, str],
+) -> None:
+    game = chess.pgn.read_game(io.StringIO(result.pgn))
+    if game is None or game.errors:
+        raise ValueError(f"Invalid game record for {path}")
+    game.headers.update(headers)
+    now = datetime.now(timezone.utc)
+    game.headers["Date"] = now.strftime("%Y.%m.%d")
+    game.headers["UTCTime"] = now.strftime("%H:%M:%S")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".pgn.tmp")
+    temporary.write_text(
+        game.accept(chess.pgn.StringExporter(
+            headers=True, variations=False, comments=True,
+        )) + "\n\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def main() -> int:
@@ -200,6 +224,8 @@ def _main(stack: ExitStack) -> int:
         if args.workers > 1 else None
     )
     for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
+        games_dir = args.output_dir / "games" / f"iteration-{iteration:06d}"
+        print(f"Saving game records to {games_dir}")
         rng = random.Random(args.seed + iteration)
         self_play_results: list[GameResult] = []
         parallel_results = (
@@ -224,6 +250,17 @@ def _main(stack: ExitStack) -> int:
                 self_play_results.append(ending)
             for example in examples:
                 replay.add(example)
+            _save_game(
+                games_dir / f"selfplay-{game_number + 1:03d}.pgn",
+                self_play_results[-1],
+                {
+                    "Event": "Learner self-play", "White": "Learner", "Black": "Learner",
+                    "Round": f"{iteration}.{game_number + 1}",
+                    "Iteration": str(iteration), "Phase": "selfplay",
+                    "Simulations": str(args.simulations),
+                    "TemperatureMoves": str(args.temperature_moves),
+                },
+            )
             print(
                 f"iteration {iteration} game {game_number + 1}/"
                 f"{args.games_per_iteration}: {len(examples)} positions; "
@@ -258,6 +295,17 @@ def _main(stack: ExitStack) -> int:
             candidate_is_white = len(evaluation_results) % 2 == 0
             candidate_result = game.white_score if candidate_is_white else -game.white_score
             evaluation_results.append(candidate_result)
+            _save_game(
+                games_dir / f"evaluation-{len(evaluation_results):03d}.pgn", game,
+                {
+                    "Event": "Candidate vs champion",
+                    "White": "Candidate" if candidate_is_white else "Champion",
+                    "Black": "Champion" if candidate_is_white else "Candidate",
+                    "Round": f"{iteration}.{len(evaluation_results)}",
+                    "Iteration": str(iteration), "Phase": "evaluation",
+                    "Simulations": str(args.eval_simulations),
+                },
+            )
             evaluation_move_caps += int(game.move_cap)
             verdict = "win" if candidate_result > 0 else "loss" if candidate_result < 0 else "draw"
             print(

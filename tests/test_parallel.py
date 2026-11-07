@@ -5,6 +5,7 @@ import sys
 import numpy as np
 import pytest
 import torch
+import chess.pgn
 from torch import nn
 
 import train
@@ -102,6 +103,17 @@ def test_parallel_training_saves_and_resumes(tmp_path, monkeypatch, capsys):
     assert checkpoint["iteration"] == 4
     assert checkpoint["optimizer_state_dict"]
     assert len(ReplayBuffer.load(tmp_path / "replay.npz")) == 16
+    for iteration in range(1, 5):
+        records = tmp_path / "games" / f"iteration-{iteration:06d}"
+        assert len(list(records.glob("selfplay-*.pgn"))) == 2
+        assert len(list(records.glob("evaluation-*.pgn"))) == 4
+        for path in records.glob("*.pgn"):
+            with path.open() as handle:
+                game = chess.pgn.read_game(handle)
+            assert game is not None and not game.errors
+            assert game.headers["Iteration"] == str(iteration)
+            expected = 2 if game.headers["Phase"] == "selfplay" else 6
+            assert len(list(game.mainline_moves())) == expected
 
 
 def test_replay_sampling_cache_is_invalidated_on_eviction():

@@ -122,6 +122,34 @@ The setting must be non-negative and affects only self-play: evaluation
 remains deterministic without exploration noise. Self-play still adds root
 exploration noise on every searched move, including after the sampling window.
 
+### Inspecting training games
+
+Training automatically saves every self-play and evaluation game as a PGN
+(chess replay text, not a PNG image). No extra flag or dependency is needed.
+Files are stored under the output directory, for example:
+
+```text
+runs/az/games/iteration-000033/selfplay-001.pgn
+runs/az/games/iteration-000033/evaluation-001.pgn
+```
+
+Import a file into a PGN-compatible chess analysis board to step through the
+full game, or open it as text. Records include opening moves, player roles,
+result, termination reason, final FEN, iteration, and search budget.
+Comments identify repeated positions and their earlier ply numbers
+(ply 0 is the initial position). When a draw is claimable by announcing a
+move that would complete threefold repetition, the final comment lists those
+moves explicitly; they are not added to the played move sequence.
+Move-cap draws are marked as adjudications, not natural chess terminations.
+
+Records work with both sequential and parallel workers; only the trainer
+writes files, in game-number order. Each record is saved as soon as the trainer
+receives that game's result, independently of iteration-end checkpoints.
+Resuming normally creates the next iteration's directory; rerunning an
+interrupted iteration replaces matching game-number files. Earlier iterations
+are retained, so game records accumulate over time. Existing checkpoints and
+replay data cannot reconstruct previously played games.
+
 ### Faster self-play and evaluation
 
 Use `--workers 8` to run games on eight CPU processes while the trainer batches
