@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!train.py
+!az_chess.py
+!az_network.py
+!az_mcts.py
+!az_replay.py
+!az_selfplay.py
+!az_training.py

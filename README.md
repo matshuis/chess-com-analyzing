@@ -4,7 +4,7 @@ Analyze chess.com games — initial scaffold.
 
 The chess.com analyzer runs on the Python standard library and a vanilla
 HTML/CSS/JS frontend. The optional AlphaZero-style training engine uses
-PyTorch, NumPy, and python-chess (see `requirements.txt`).
+PyTorch, NumPy, and python-chess (see `pyproject.toml` and `uv.lock`).
 
 ## Files
 
@@ -26,7 +26,7 @@ PyTorch, NumPy, and python-chess (see `requirements.txt`).
 
 ```bash
 # 1. start the static server
-python3 server.py
+uv run server.py
 
 # 2. open http://localhost:8000 and type a chess.com username
 #    (or open http://localhost:8000/?user=<name> to auto-load)
@@ -41,8 +41,8 @@ appear in the list incrementally as each monthly archive arrives.
 If you'd rather download games once and replay them offline, run:
 
 ```bash
-python3 download_games.py <username>   # writes games.json
-python3 server.py
+uv run download_games.py <username>   # writes games.json
+uv run server.py
 ```
 
 If `games.json` exists in the project root, the UI silently loads it
@@ -70,32 +70,103 @@ buffer, and candidate-vs-champion evaluation.
 
 ### Setup and first run
 
-Use Python 3.10+ and install the dependencies in `requirements.txt`. For an
-NVIDIA GPU, install a CUDA-enabled PyTorch build compatible with the installed
-driver using the official PyTorch installation selector first, then install
-the remaining requirements:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and use
+Python 3.10+ (Python 3.12 is used in Docker). Dependencies are declared in
+`pyproject.toml` and resolved in the committed `uv.lock`. On Linux and Windows,
+uv installs PyTorch 2.7.1 from the CUDA 12.8 wheel index; macOS uses PyPI.
+CUDA wheels also run on CPU, but GPU use requires a compatible NVIDIA driver.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python train.py --device auto --iterations 1 \
+uv sync --locked
+uv run train.py --device auto --iterations 1 \
   --games-per-iteration 2 --simulations 16 --eval-games 2 \
   --eval-simulations 8 --train-steps 10 --batch-size 64
 ```
+
+`uv sync --locked` creates or updates `.venv` and includes pytest from the
+development dependency group. No manual activation or pip commands are
+needed. Run Python tests with `uv run pytest -q` and GUI tests with
+`node --test tests/test_gui_castling.js`. Use `uv add PACKAGE` to change
+dependencies, or `uv add --dev PACKAGE` for development tools; commit both
+`pyproject.toml` and the resulting `uv.lock`. Use `uv lock --upgrade` for an
+intentional dependency refresh. Training and GUI commands use `uv run`;
+VS Code's Python debugger can continue using the `.venv` interpreter.
 
 `--device auto` selects CUDA when the installed PyTorch build can use it and
 otherwise runs on CPU. The first run writes `runs/az/champion.pt`,
 `runs/az/latest.pt`, and `runs/az/replay.npz`; subsequent runs resume from
 those files. Training is intentionally opt-in and does not download data.
 
+### Training in Docker
+
+The training-only image includes PyTorch 2.7.1 with CUDA 12.8, plus the
+dependencies locked in `uv.lock`, installed with `uv sync --locked --no-dev`.
+It excludes the GUI, local virtual
+environment, game data, and checkpoints. The CUDA image also runs on CPU.
+The base image targets Linux x86-64; for the RTX 5050/5060, use a host
+NVIDIA driver compatible with CUDA 12.8.
+
+Build once from the project root:
+
+```bash
+docker build -t chess-training .
+mkdir -p runs
+```
+
+GPU training requires the NVIDIA Container Toolkit configured for Docker
+(or GPU-enabled Docker Desktop with WSL2 on Windows). The NVIDIA driver
+belongs on the host; you do not need a separate host Python environment.
+Follow the [NVIDIA Container Toolkit installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+If Docker reports `no known GPU vendor found` or cannot select a device
+driver with GPU capabilities, configure the host's container toolkit first;
+reinstalling PyTorch inside the image will not fix GPU passthrough.
+Run one short training iteration:
+
+```bash
+docker run --rm --init --gpus all \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,source="$(pwd)/runs",target=/app/runs \
+  chess-training \
+  --device cuda --iterations 1 \
+  --games-per-iteration 2 --simulations 16 --eval-games 2 \
+  --eval-simulations 8 --train-steps 10 --batch-size 64
+```
+
+The container entrypoint is `uv run --frozen --no-sync train.py`, using the
+environment installed during the image build without downloads at runtime.
+All arguments after `chess-training` are forwarded directly to `train.py`.
+For CPU-only execution, omit `--gpus all` and use `--device cpu`. The
+commands above use Bash/Linux or WSL; the `--user` option keeps generated
+files owned by your host user. The image defaults to UID/GID 1000 otherwise.
+
+The bind mount is essential: the default output path `/app/runs/az` maps to
+your host's `runs/az`. Repeating the command resumes from that champion and
+replay buffer; the GUI can load the same host `runs/az/champion.pt`. Do not
+run multiple trainers against the same output directory. For an independent
+experiment, append `--output-dir runs/experiment-name`. Changing network
+dimensions also requires a separate output directory.
+
+Useful checks:
+
+```bash
+docker run --rm chess-training --help
+docker run --rm --gpus all --entrypoint uv chess-training \
+  run --frozen --no-sync python -c "import torch; print(torch.__version__, torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+```
+
+Using `--device cuda` deliberately fails if GPU access is unavailable rather
+than quietly training on CPU. Checkpoints are saved at iteration boundaries;
+interrupting midway through an iteration loses its unsaved progress.
+Rebuild the image after changing training code or dependencies. The image is
+large because it includes the CUDA runtime; it does not change the current
+sequential MCTS throughput limitations.
+
 ### Play against your champion
 
 Start the existing GUI server; no champion-specific arguments are required:
 
 ```bash
-source .venv/bin/activate
-python server.py
+uv run server.py
 ```
 
 Open http://localhost:8000, set the **Checkpoint** project-relative path
@@ -121,7 +192,8 @@ The checkpoint supplies its own network dimensions, so no `--channels` or
 **Play champion** again to apply changes. Updated checkpoint files reload
 automatically on the next request. Paths must point to `.pt` files inside
 the project. Dependencies load lazily, so the analyzer alone still runs
-with only the standard library. The existing `--champion`, `--device`, and
+with only the standard library at runtime (uv installs the full project
+environment). The existing `--champion`, `--device`, and
 `--simulations` server flags remain available for command-line use.
 
 ### Model and action representation

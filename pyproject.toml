@@ -1,0 +1,26 @@
+[project]
+name = "chess-com-analyzing"
+version = "0.1.0"
+description = "Chess.com game analyzer and compact AlphaZero-style chess training"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26,<3",
+    "python-chess>=1.999",
+    "torch==2.7.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

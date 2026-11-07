@@ -3,7 +3,7 @@
 
 Run it from the project root:
 
-    python3 server.py
+    uv run server.py
 
 Then open http://localhost:8000 in your browser.  The UI expects
 ``games.json`` to be present in the same directory (produced by
