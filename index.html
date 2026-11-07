@@ -38,6 +38,26 @@
           <h2 id="game-title">Select a game</h2>
           <p id="game-subtitle"></p>
         </div>
+        <div id="champion-controls">
+          <label for="champion-checkpoint">Checkpoint</label>
+          <input id="champion-checkpoint" type="text" value="runs/az/champion.pt" />
+          <label for="champion-device">Device</label>
+          <select id="champion-device">
+            <option value="auto">Auto</option>
+            <option value="cpu">CPU</option>
+            <option value="cuda">CUDA GPU</option>
+          </select>
+          <label for="champion-simulations">Simulations</label>
+          <input id="champion-simulations" type="number" min="1" max="1024" value="64" />
+          <label for="champion-color">Play as</label>
+          <select id="champion-color">
+            <option value="w">White</option>
+            <option value="b">Black</option>
+          </select>
+          <button id="btn-champion" type="button">Play champion</button>
+          <button id="btn-champion-retry" type="button" hidden>Retry reply</button>
+          <span id="champion-status" role="status" aria-live="polite"></span>
+        </div>
 
         <div id="board-and-moves">
           <div id="board-column">

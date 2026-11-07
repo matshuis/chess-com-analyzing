@@ -436,10 +436,21 @@ function pseudoLegalMoves(pos) {
         const tp = pos.board[target];
         if (!tp || isWhite(tp) !== white) out.push({ from: frm, to: target });
       }
-      // Castling — required only for completeness of the legal-move
-      // generator. We skip it here because forks during castling are
-      // not relevant in practice and the SAN replay path handles
-      // castles separately.
+      const homeRank = white ? 0 : 7;
+      if (f === 4 && r === homeRank && !isSquareAttackedBy(pos.board, frm, !white)) {
+        for (const castle of ["K", "Q"]) {
+          const key = white ? castle : castle.toLowerCase();
+          const rookFile = castle === "K" ? 7 : 0;
+          const clearFiles = castle === "K" ? [5, 6] : [1, 2, 3];
+          const kingFiles = castle === "K" ? [5, 6] : [3, 2];
+          if (pos.castling[key]
+              && pos.board[sq(rookFile, r)] === (white ? "R" : "r")
+              && clearFiles.every(file => pos.board[sq(file, r)] === "")
+              && kingFiles.every(file => !isSquareAttackedBy(pos.board, sq(file, r), !white))) {
+            out.push({ from: frm, to: sq(castle === "K" ? 6 : 2, r), castle });
+          }
+        }
+      }
     } else {
       const dirs = pt === "B" ? BISHOP_DIRS
                 : pt === "R" ? ROOK_DIRS
@@ -463,18 +474,29 @@ function pseudoLegalMoves(pos) {
 }
 
 function makeBareMove(pos, mv) {
-  // Simplified mover used for pseudo-legal exploration only — no
-  // castling-rights / EP bookkeeping beyond what the fork search needs.
+  // Scratch move application for legal-move and tactical exploration.
   const next = clonePosition(pos);
   const piece = next.board[mv.from];
   next.board[mv.from] = "";
-  if (mv.isEp) {
+  if (mv.castle) {
+    const rank = rankOf(mv.from);
+    const rookFrom = sq(mv.castle === "K" ? 7 : 0, rank);
+    const rookTo = sq(mv.castle === "K" ? 5 : 3, rank);
+    next.board[mv.to] = piece;
+    next.board[rookTo] = next.board[rookFrom];
+    next.board[rookFrom] = "";
+  } else if (mv.isEp) {
     next.board[sq(fileOf(mv.to), rankOf(mv.from))] = "";
     next.board[mv.to] = piece;
   } else if (mv.promotion) {
     next.board[mv.to] = isWhite(piece) ? mv.promotion : mv.promotion.toLowerCase();
   } else {
     next.board[mv.to] = piece;
+  }
+  if (piece === "K") { next.castling.K = false; next.castling.Q = false; }
+  if (piece === "k") { next.castling.k = false; next.castling.q = false; }
+  for (const [square, right] of [[0, "Q"], [7, "K"], [56, "q"], [63, "k"]]) {
+    if (mv.from === square || mv.to === square) next.castling[right] = false;
   }
   next.epTarget = -1;
   if (piece.toUpperCase() === "P" && Math.abs(rankOf(mv.to) - rankOf(mv.from)) === 2) {
@@ -1232,7 +1254,10 @@ function renderPlayerBars() {
   const game = state.games[state.selectedGameIdx];
   if (!game) {
     for (const bar of [els.playerTop, els.playerBottom]) {
-      bar.querySelector(".name").textContent = "—";
+      const color = bar === els.playerBottom ? state.orientation
+        : (state.orientation === "w" ? "b" : "w");
+      bar.querySelector(".name").textContent = championPlay.active
+        ? (color === championPlay.humanColor ? "You" : "Champion") : "—";
       bar.querySelector(".rating").textContent = "";
       bar.querySelector(".result-badge").textContent = "";
       bar.querySelector(".result-badge").className = "result-badge";
@@ -1273,11 +1298,18 @@ function renderBoard(pos) {
     cell.classList.remove("hi");
     cell.textContent = "";
     if (piece) {
-      const span = document.createElement("span");
-      span.textContent = PIECE_GLYPHS[piece];
-      span.className = isWhite(piece) ? "piece-w" : "piece-b";
-      cell.appendChild(span);
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", `board-piece ${isWhite(piece) ? "piece-w" : "piece-b"}`);
+      svg.setAttribute("viewBox", "0 0 64 64");
+      svg.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+      use.setAttribute("href", `pieces.svg#${piece.toUpperCase()}`);
+      svg.appendChild(use);
+      cell.appendChild(svg);
     }
+    const names = { K: "king", Q: "queen", R: "rook", B: "bishop", N: "knight", P: "pawn" };
+    cell.setAttribute("aria-label", `${sqName(idx)}${piece
+      ? `, ${isWhite(piece) ? "white" : "black"} ${names[piece.toUpperCase()]}` : ", empty"}`);
   }
   if (pos.lastMove) {
     const fromCell = els.board.querySelector(`[data-idx="${pos.lastMove.from}"]`);
@@ -2161,6 +2193,7 @@ function renderGameList() {
 }
 
 function selectGame(idx) {
+  stopChampionPlay();
   state.selectedGameIdx = idx;
   const g = state.games[idx];
   if (!g) return;
@@ -2269,6 +2302,7 @@ function slimGame(g) {
 }
 
 async function loadFromChessCom(username) {
+  stopChampionPlay();
   if (activeLoad) activeLoad.controller.abort();
   const controller = new AbortController();
   activeLoad = { controller };
@@ -2327,7 +2361,7 @@ async function loadFromChessCom(username) {
     }
 
     setStatus(`Loaded ${state.games.length} games for ${username}.`);
-    if (state.games.length) selectGame(0);
+    if (state.games.length && !championPlay.active) selectGame(0);
   } catch (err) {
     if (err.name === "AbortError") {
       setStatus("Cancelled.");
@@ -2378,6 +2412,117 @@ const freePlay = {
   selected: -1,         // currently picked-up square, or -1
   legalForSelected: [], // legal {from,to,...} moves for that square
 };
+
+const championPlay = {
+  active: false,
+  humanColor: "w",
+  busy: false,
+  ended: false,
+  generation: 0,
+  settings: null,
+};
+
+function championStatus(message, error = false) {
+  const label = document.getElementById("champion-status");
+  label.textContent = message;
+  label.classList.toggle("error", error);
+}
+
+function stopChampionPlay() {
+  championPlay.generation++;
+  championPlay.active = false;
+  championPlay.busy = false;
+  championPlay.ended = false;
+  document.getElementById("btn-champion-retry").hidden = true;
+  championStatus("");
+}
+
+function championHistory() {
+  return state.positions.slice(1).map((position, index) => {
+    const { from, to } = position.lastMove;
+    const piece = state.positions[index].board[from];
+    const promotion = piece.toUpperCase() === "P" && [0, 7].includes(rankOf(to))
+      ? position.board[to].toLowerCase() : "";
+    return sqName(from) + sqName(to) + promotion;
+  });
+}
+
+async function requestChampionReply() {
+  if (!championPlay.active || championPlay.busy || championPlay.ended) return;
+  const generation = championPlay.generation;
+  championPlay.busy = true;
+  document.getElementById("btn-champion-retry").hidden = true;
+  championStatus("Champion is thinking...");
+  try {
+    const response = await fetch("/api/champion", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...championPlay.settings,
+        moves: championHistory(),
+        human_color: championPlay.humanColor,
+      }),
+    });
+    const data = await response.json();
+    if (generation !== championPlay.generation) return;
+    if (!response.ok) throw new Error(data.error || `Server returned ${response.status}`);
+    if (data.move) {
+      setPly(state.positions.length - 1);
+      const from = parseSquare(data.move.slice(0, 2));
+      const to = parseSquare(data.move.slice(2, 4));
+      const promotion = data.move.length === 5 ? data.move[4].toUpperCase() : null;
+      if (!makeUserMove(from, to, promotion)) {
+        throw new Error("Could not apply the champion's move");
+      }
+    }
+    championPlay.ended = !!data.result;
+    championStatus(data.result
+      ? `Game over: ${data.result} (${data.reason.toLowerCase().replaceAll("_", " ")})`
+      : "Your turn");
+  } catch (error) {
+    if (generation !== championPlay.generation) return;
+    console.error("Champion reply failed", error);
+    championStatus(error.message, true);
+    document.getElementById("btn-champion-retry").hidden = false;
+  } finally {
+    if (generation === championPlay.generation) championPlay.busy = false;
+  }
+}
+
+async function startChampionPlay() {
+  resetFreePlay();
+  championPlay.active = true;
+  championPlay.humanColor = document.getElementById("champion-color").value;
+  championPlay.settings = {
+    checkpoint: document.getElementById("champion-checkpoint").value.trim(),
+    device: document.getElementById("champion-device").value,
+    simulations: Number(document.getElementById("champion-simulations").value),
+  };
+  setOrientation(championPlay.humanColor);
+  setPly(0);
+  els.gameTitle.textContent = "Play against the champion";
+  const generation = championPlay.generation;
+  championPlay.busy = true;
+  championStatus("Loading champion...");
+  try {
+    const response = await fetch("/api/champion/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(championPlay.settings),
+    });
+    const data = await response.json();
+    if (generation !== championPlay.generation) return;
+    if (!response.ok) throw new Error(data.error || `Server returned ${response.status}`);
+    championPlay.busy = false;
+    championStatus(`Your turn (${data.device})`);
+    if (championPlay.humanColor === "b") requestChampionReply();
+  } catch (error) {
+    if (generation !== championPlay.generation) return;
+    stopChampionPlay();
+    console.error("Champion loading failed", error);
+    championStatus(error.message, true);
+  }
+}
 
 function freePlayActive() {
   return state.selectedGameIdx === -1;
@@ -2551,6 +2696,9 @@ function renderSelection() {
 
 function onBoardClick(ev) {
   if (!freePlayActive()) return;
+  if (championPlay.active && (championPlay.busy || championPlay.ended
+      || state.ply !== state.positions.length - 1
+      || currentPosition().sideToMove !== championPlay.humanColor)) return;
   const cell = ev.target.closest(".sq");
   if (!cell || !els.board.contains(cell)) return;
   const idx = parseInt(cell.dataset.idx, 10);
@@ -2561,7 +2709,8 @@ function onBoardClick(ev) {
     const mv = freePlay.legalForSelected.find((m) => m.to === idx);
     if (mv) {
       // Auto-queen on promotion. (Could be replaced by a chooser.)
-      makeUserMove(mv.from, mv.to, mv.promotion ? "Q" : null);
+      if (makeUserMove(mv.from, mv.to, mv.promotion ? "Q" : null)
+          && championPlay.active) requestChampionReply();
       return;
     }
     // Clicking the selected square deselects.
@@ -2598,6 +2747,7 @@ function onBoardClick(ev) {
  *  button to either restart a free-play game or to leave a loaded
  *  chess.com game and return to free play. */
 function resetFreePlay() {
+  stopChampionPlay();
   state.selectedGameIdx = -1;
   state.positions = [initialPosition()];
   state.sanList = [];
@@ -2611,6 +2761,7 @@ function resetFreePlay() {
   freePlay.selected = -1;
   freePlay.legalForSelected = [];
   els.gameTitle.textContent = "Free play — click pieces to move";
+  els.gameSubtitle.textContent = "";
   renderGameList();        // drop the .active highlight in the sidebar
   renderMoveList();
   setPly(0);
@@ -2658,6 +2809,8 @@ function init() {
     setPly(state.ply); // re-render board contents into the rebuilt cells
   });
   els.btnReset?.addEventListener("click", resetFreePlay);
+  document.getElementById("btn-champion").addEventListener("click", startChampionPlay);
+  document.getElementById("btn-champion-retry").addEventListener("click", requestChampionReply);
   els.board.addEventListener("click", onBoardClick);
   els.filterInput.addEventListener("input", renderGameList);
   els.btnToggleGames?.addEventListener("click", () => {
