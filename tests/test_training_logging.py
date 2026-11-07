@@ -45,6 +45,7 @@ def test_evaluation_callback_preserves_candidate_score(monkeypatch):
     score = az_selfplay.evaluate_match(
         model, model, games=2, simulations=1, max_plies=4,
         on_game_end=endings.append,
+        openings=((),),
     )
     assert score == 0.5
     assert len(endings) == 2
@@ -63,8 +64,9 @@ def test_training_prints_draw_and_move_cap_summaries(tmp_path, monkeypatch, caps
     log = capsys.readouterr().out
     assert "result=1/2-1/2; reason=move_cap" in log
     assert "white_wins=0, black_wins=0, draws=1 (move_cap=1)" in log
-    assert "evaluation game 1/2: candidate=draw; color=white; plies=2" in log
-    assert "evaluation game 2/2: candidate=draw; color=black; plies=2" in log
+    assert "evaluation game 1/2: candidate=draw; color=white; plies=6" in log
+    assert "evaluation game 2/2: candidate=draw; color=black; plies=6" in log
+    assert "opening=e2e4 e7e5 g1f3 b8c6" in log
     assert "wins=0, draws=2, losses=0; move_cap=2; candidate_score=0.500" in log
     assert "promotion_threshold=0.550" in log
     assert "Kept incumbent" in log

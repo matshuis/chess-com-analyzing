@@ -218,6 +218,19 @@ environment). The existing `--champion`, `--device`, and
   only a quick filter; use 20-40 evaluation games before treating promotion
   scores as meaningful.
 
+Evaluation uses ten fixed four-ply opening sequences (Open Game, Sicilian,
+French, Caro-Kann, Queen's Gambit, Slav, two Indian setups, English, and
+Reti), rather than repeatedly starting at the initial board. Each opening
+is played twice with candidate colors swapped and identical search budgets.
+`--eval-games` must be even: 20 games cover all ten openings, four games
+cover the first two, and counts above 20 cycle through the same opening
+suite (so they do not add new independent starting positions).
+The order is fixed across iterations for reproducible comparisons; search
+remains noise-free. Opening moves are preserved in board history for the
+network and repetition detection. `--max-plies` allows that many searched
+half-moves after the opening; logged `plies` includes the opening.
+Self-play still starts at the initial position and is unaffected.
+
 ### Code map and data
 
 - `az_chess.py` — canonical board features and reversible 73-plane actions.
@@ -253,6 +266,8 @@ Training logs report self-play results and ending reasons, followed by a
 white-wins/black-wins/draws summary. Evaluation logs report each game's
 candidate-relative outcome and color, plies, result, and ending reason,
 then total wins/draws/losses, move-cap games, score, and promotion threshold.
+Evaluation game logs also include the UCI opening sequence, letting you
+verify adjacent games share an opening with opposite candidate colors.
 `reason=move_cap` identifies an unfinished game scored as a draw; move-cap
 games are included in draw totals. A natural ending on the final allowed
 ply (such as checkmate) is not counted as a move-cap draw. The logging does

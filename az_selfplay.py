@@ -15,6 +15,21 @@ from az_network import ChessNet
 from az_replay import TrainingExample
 
 
+# Short, fixed openings keep comparisons reproducible across iterations.
+EVALUATION_OPENINGS: tuple[tuple[str, ...], ...] = (
+    ("e2e4", "e7e5", "g1f3", "b8c6"),
+    ("e2e4", "c7c5", "g1f3", "d7d6"),
+    ("e2e4", "e7e6", "d2d4", "d7d5"),
+    ("e2e4", "c7c6", "d2d4", "d7d5"),
+    ("d2d4", "d7d5", "c2c4", "e7e6"),
+    ("d2d4", "d7d5", "c2c4", "c7c6"),
+    ("d2d4", "g8f6", "c2c4", "g7g6"),
+    ("d2d4", "g8f6", "c2c4", "e7e6"),
+    ("c2c4", "e7e5", "b1c3", "g8f6"),
+    ("g1f3", "d7d5", "g2g3", "g8f6"),
+)
+
+
 @dataclass(frozen=True)
 class GameResult:
     plies: int
@@ -22,9 +37,10 @@ class GameResult:
     reason: str
     move_cap: bool
     white_score: float
+    opening: tuple[str, ...] = ()
 
 
-def _game_result(board: chess.Board) -> GameResult:
+def _game_result(board: chess.Board, opening: tuple[str, ...] = ()) -> GameResult:
     outcome = board.outcome(claim_draw=True)
     return GameResult(
         plies=len(board.move_stack),
@@ -32,6 +48,7 @@ def _game_result(board: chess.Board) -> GameResult:
         reason=outcome.termination.name.lower() if outcome else "move_cap",
         move_cap=outcome is None,
         white_score=_white_result(board),
+        opening=opening,
     )
 
 
@@ -98,19 +115,35 @@ def evaluate_match(
     max_plies: int = 256,
     device: torch.device | str = "cpu",
     on_game_end: Callable[[GameResult], None] | None = None,
+    openings: tuple[tuple[str, ...], ...] = EVALUATION_OPENINGS,
 ) -> float:
-    """Return candidate's score per game (win=1, draw=.5, loss=0)."""
-    if games < 1:
-        raise ValueError("games must be at least one")
+    """Score paired openings; max_plies counts searched plies after the opening."""
+    if games < 2 or games % 2:
+        raise ValueError("games must be a positive even number for color-swapped pairs")
     if max_plies < 1:
         raise ValueError("max_plies must be positive")
+    if not openings:
+        raise ValueError("At least one evaluation opening is required")
+    starting_boards: list[chess.Board] = []
+    for opening in openings:
+        board = chess.Board()
+        for uci in opening:
+            move = chess.Move.from_uci(uci)
+            if board.is_game_over(claim_draw=True) or move not in board.legal_moves:
+                raise ValueError(f"Invalid evaluation opening move: {uci}")
+            board.push(move)
+        if board.is_game_over(claim_draw=True):
+            raise ValueError("Evaluation openings must end in a non-terminal position")
+        starting_boards.append(board)
     candidate_search = MCTS(candidate, device=device)
     incumbent_search = MCTS(incumbent, device=device)
     score = 0.0
 
     for game_index in range(games):
         candidate_is_white = game_index % 2 == 0
-        board = chess.Board()
+        opening_index = (game_index // 2) % len(openings)
+        opening = openings[opening_index]
+        board = starting_boards[opening_index].copy(stack=True)
         for _ in range(max_plies):
             if board.is_game_over(claim_draw=True):
                 break
@@ -122,7 +155,7 @@ def evaluate_match(
                 break
             board.push(choose_move(visits, temperature=0.0))
 
-        game_result = _game_result(board)
+        game_result = _game_result(board, opening)
         if on_game_end is not None:
             on_game_end(game_result)
         result = game_result.white_score

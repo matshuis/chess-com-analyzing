@@ -93,6 +93,8 @@ def main() -> int:
     invalid = [name for name, value in positive_values.items() if value < 1]
     if invalid:
         raise ValueError(f"These settings must be positive: {', '.join(invalid)}")
+    if args.eval_games % 2:
+        raise ValueError("eval-games must be even for color-swapped opening pairs")
     if not 0.5 <= args.promotion_score <= 1:
         raise ValueError("promotion-score must be between 0.5 and 1")
 
@@ -175,6 +177,7 @@ def main() -> int:
                 f"{args.eval_games}: candidate={verdict}; "
                 f"color={'white' if candidate_is_white else 'black'}; "
                 f"plies={game.plies}; result={game.result}; reason={game.reason}"
+                f"; opening={' '.join(game.opening) or 'start position'}"
             )
 
         score = evaluate_match(
