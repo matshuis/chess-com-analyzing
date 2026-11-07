@@ -25,8 +25,11 @@ def _device(value: str) -> torch.device:
     return selected
 
 
-def _load_weights(model: ChessNet, path: Path, device: torch.device) -> dict:
-    checkpoint = torch.load(path, map_location=device, weights_only=True)
+def _load_weights(
+    model: ChessNet, path: Path, device: torch.device, checkpoint: dict | None = None,
+) -> dict:
+    if checkpoint is None:
+        checkpoint = torch.load(path, map_location=device, weights_only=True)
     if checkpoint["channels"] != model.channels or checkpoint["blocks"] != model.blocks:
         raise ValueError(
             "Checkpoint architecture does not match --channels/--blocks"
@@ -42,18 +45,29 @@ def _save_checkpoint(
     promoted: bool,
     channels: int,
     blocks: int,
+    optimizer: torch.optim.Optimizer | None = None,
+    scaler: torch.amp.GradScaler | None = None,
+    scaler_state_dict: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "iteration": iteration,
-            "promoted": promoted,
-            "channels": channels,
-            "blocks": blocks,
-            "state_dict": model.state_dict(),
-        },
-        path,
-    )
+    checkpoint = {
+        "iteration": iteration,
+        "promoted": promoted,
+        "channels": channels,
+        "blocks": blocks,
+        "state_dict": model.state_dict(),
+    }
+    if optimizer is not None and scaler is not None:
+        checkpoint.update({
+            "learner_version": 1,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": (
+                scaler.state_dict() if scaler_state_dict is None else scaler_state_dict
+            ),
+        })
+    temporary = path.with_suffix(".pt.tmp")
+    torch.save(checkpoint, temporary)
+    temporary.replace(path)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,6 +111,8 @@ def main() -> int:
         raise ValueError("eval-games must be even for color-swapped opening pairs")
     if not 0.5 <= args.promotion_score <= 1:
         raise ValueError("promotion-score must be between 0.5 and 1")
+    if not np.isfinite(args.learning_rate) or args.learning_rate <= 0:
+        raise ValueError("learning-rate must be finite and positive")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -114,6 +130,42 @@ def main() -> int:
         start_iteration = int(checkpoint["iteration"])
         print(f"Loaded champion from iteration {start_iteration}")
     incumbent = copy.deepcopy(model).eval()
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.learning_rate, weight_decay=1e-4
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    saved_scaler = {}
+    if latest_path.exists():
+        learner_checkpoint = torch.load(latest_path, map_location="cpu", weights_only=True)
+        if "learner_version" in learner_checkpoint:
+            if learner_checkpoint["learner_version"] != 1:
+                raise ValueError("Unsupported learner checkpoint version")
+            if not champion_path.exists():
+                raise ValueError("Learner checkpoint exists without champion.pt; restore both files")
+            learner_iteration = int(learner_checkpoint["iteration"])
+            if learner_iteration != start_iteration:
+                raise ValueError("Learner and champion iterations differ; restore matching checkpoints")
+            learner_checkpoint = _load_weights(
+                model, latest_path, torch.device("cpu"), checkpoint=learner_checkpoint,
+            )
+            start_iteration = learner_iteration
+            optimizer.load_state_dict(learner_checkpoint["optimizer_state_dict"])
+            # Respect a requested learning rate while retaining Adam's accumulated moments.
+            for group in optimizer.param_groups:
+                group["lr"] = args.learning_rate
+            saved_scaler = learner_checkpoint["scaler_state_dict"]
+            if scaler.is_enabled() and saved_scaler:
+                scaler.load_state_dict(saved_scaler)
+            elif scaler.is_enabled():
+                print("CPU learner checkpoint has no AMP state; initializing CUDA scaler")
+            elif saved_scaler:
+                print("AMP disabled on CPU; preserving saved CUDA scaler state")
+            print(f"Resumed learner and optimizer from iteration {start_iteration}")
+        else:
+            print("Legacy latest.pt has no learner state; initializing learner from champion")
+    else:
+        print("Initializing learner from champion" if champion_path.exists()
+              else "Initializing learner and champion with random weights")
     if replay_path.exists():
         replay = ReplayBuffer.load(replay_path, capacity=args.buffer_size)
         print(f"Loaded {len(replay):,} replay positions")
@@ -161,6 +213,8 @@ def main() -> int:
             device=device,
             learning_rate=args.learning_rate,
             rng=rng,
+            optimizer=optimizer,
+            scaler=scaler,
         )
         evaluation_results: list[float] = []
         evaluation_move_caps = 0
@@ -202,15 +256,18 @@ def main() -> int:
             incumbent.load_state_dict(model.state_dict())
             print(f"Promoted candidate (score {score:.3f})")
         else:
-            model.load_state_dict(incumbent.state_dict())
-            print(f"Kept incumbent (candidate score {score:.3f})")
+            print(f"Kept incumbent (candidate score {score:.3f}); learner updates retained")
 
         _save_checkpoint(
             champion_path, incumbent, iteration, promoted, args.channels, args.blocks
         )
+        if scaler.is_enabled():
+            saved_scaler = scaler.state_dict()
         _save_checkpoint(
-            latest_path, model, iteration, promoted, args.channels, args.blocks
+            latest_path, model, iteration, promoted, args.channels, args.blocks,
+            optimizer=optimizer, scaler=scaler, scaler_state_dict=saved_scaler,
         )
+        print(f"Saved learner weights and optimizer to {latest_path}")
         replay.save(replay_path)
         print(
             f"iteration {iteration}: policy_loss={policy_loss:.4f}, "

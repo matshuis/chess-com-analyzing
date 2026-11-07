@@ -95,7 +95,24 @@ VS Code's Python debugger can continue using the `.venv` interpreter.
 `--device auto` selects CUDA when the installed PyTorch build can use it and
 otherwise runs on CPU. The first run writes `runs/az/champion.pt`,
 `runs/az/latest.pt`, and `runs/az/replay.npz`; subsequent runs resume from
-those files. Training is intentionally opt-in and does not download data.
+those files. `latest.pt` holds the continuously trained **learner**, including
+AdamW optimizer moments, update counters, and mixed-precision scaler state.
+`champion.pt` holds the GUI opponent and changes weights only on promotion.
+Rejected candidates now keep their learner updates for the next iteration;
+self-play uses the learner, and evaluation compares it against the champion.
+The learner can become worse as well as better: continued training is not a
+guarantee of improvement.
+
+Existing checkpoints migrate automatically: if `latest.pt` has no learner
+state, training initializes the learner from `champion.pt` with a fresh
+optimizer (old optimizer state was never saved). Keep all three files together
+when resuming or backing up. The iteration number on the champion records
+the last completed iteration, not necessarily the last promotion.
+Changing `--learning-rate` on resume updates the rate while keeping optimizer
+moments. Switching CPU/CUDA retains optimizer state; the scaler is restored
+on CUDA when available, preserved while training on CPU, and initialized
+when resuming a CPU-only checkpoint.
+Training is intentionally opt-in and does not download data.
 
 ### Training in Docker
 
@@ -140,7 +157,7 @@ commands above use Bash/Linux or WSL; the `--user` option keeps generated
 files owned by your host user. The image defaults to UID/GID 1000 otherwise.
 
 The bind mount is essential: the default output path `/app/runs/az` maps to
-your host's `runs/az`. Repeating the command resumes from that champion and
+your host's `runs/az`. Repeating the command resumes the learner, champion, and
 replay buffer; the GUI can load the same host `runs/az/champion.pt`. Do not
 run multiple trainers against the same output directory. For an independent
 experiment, append `--output-dir runs/experiment-name`. Changing network
@@ -272,5 +289,5 @@ verify adjacent games share an opening with opposite candidate colors.
 games are included in draw totals. A natural ending on the final allowed
 ply (such as checkmate) is not counted as a move-cap draw. The logging does
 not change targets or promotion rules.
-Checkpoint/replay files can grow over time, so preserve `champion.pt` and
-`replay.npz` together when backing up a run.
+Checkpoint/replay files can grow over time, so preserve `champion.pt`,
+`latest.pt`, and `replay.npz` together when backing up a run.

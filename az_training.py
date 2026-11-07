@@ -18,6 +18,8 @@ def train_network(
     device: torch.device | str,
     learning_rate: float = 1e-3,
     rng: random.Random | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[float, float]:
     if steps < 1 or learning_rate <= 0:
         raise ValueError("steps and learning_rate must be positive")
@@ -29,12 +31,14 @@ def train_network(
     target_device = torch.device(device)
     model.to(target_device)
     model.train()
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=1e-4
-    )
-    scaler = torch.amp.GradScaler(
-        "cuda", enabled=target_device.type == "cuda"
-    )
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=learning_rate, weight_decay=1e-4
+        )
+    if scaler is None:
+        scaler = torch.amp.GradScaler(
+            "cuda", enabled=target_device.type == "cuda"
+        )
     policy_total = 0.0
     value_total = 0.0
 
