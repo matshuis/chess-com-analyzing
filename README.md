@@ -150,6 +150,59 @@ interrupted iteration replaces matching game-number files. Earlier iterations
 are retained, so game records accumulate over time. Existing checkpoints and
 replay data cannot reconstruct previously played games.
 
+### Optional draw claims and independent scorecards
+
+Threefold repetition and the fifty-move rule are now optional claims in search,
+self-play, evaluation, and champion gameplay. Search considers claiming as a
+zero-value action alongside legal moves; the game stops only if that action is
+selected. Automatic fivefold repetition, the seventy-five-move rule, checkmate,
+stalemate, and insufficient material remain mandatory endings. Search checks
+for immediate checkmates before consulting network priors, so a claim cannot
+hide a mate in one. In the GUI, **Claim draw** appears when the human can claim;
+the human can instead continue playing. PGNs mark actual claims with
+`DrawClaimed "true"` and never insert a null move into the played history.
+
+Existing weights, optimizer state, replay files, and training hyperparameters
+are unchanged. The internal claim action has no learned policy output, keeping
+the 4,672-action checkpoint format compatible: its search prior is uniform
+relative to the legal move count, with ordinary move priors scaled accordingly.
+At claimable leaf positions the value cannot be worse than a draw. Claim-only
+decisions add no artificial move-policy example; other policy targets are
+normalized over ordinary moves. Older replay data retains its original labels,
+including draws caused by the previous automatic-claim behavior. New examples
+gradually replace it; pre-fix and post-fix evaluation scores are not directly
+comparable.
+
+Each iteration saves `scorecard.json` beside its PGNs. It records the promotion
+match score and a versioned five-position tactical suite: the three recorded
+claimable mate positions plus white/black hanging-queen captures. Each case
+includes the selected search move, expected moves, and the network's independent
+top legal policy move and probability mass on the expected moves. Mate checks
+exercise the deterministic mate-in-one safeguard, not learned strength; use
+policy scores and capture checks as additional signals. This tiny suite is a
+regression scorecard, not a comprehensive chess-strength rating.
+
+For a fixed reference opponent, supply a separate backed-up checkpoint:
+
+```bash
+uv run train.py --device auto --workers 8 --iterations 5 \
+  --games-per-iteration 32 --simulations 128 --temperature-moves 60 \
+  --eval-games 20 --eval-simulations 128 --train-steps 100 --batch-size 128 \
+  --baseline-checkpoint runs/baseline/champion.pt --baseline-eval-games 20
+```
+
+Replace the baseline path with your copy. Baseline evaluation is opt-in
+(`--baseline-eval-games 0` by default), uses the existing evaluation search
+budget and openings, and runs through the same worker pool. It adds games, not
+optimizer updates, and never affects promotion. Baseline weights remain fixed
+in memory across iterations; their SHA-256 is logged, included in baseline
+PGNs and the JSON scorecard, and checked for file changes each iteration.
+The active learner/champion paths cannot be used as the baseline. Baseline
+models can have different network dimensions. Results are saved as
+`baseline-001.pgn`, etc.; counts above 20 still repeat the fixed opening suite.
+Keep this file unchanged across experiments. Docker includes the new rule and
+scorecard modules; rebuild the image after these changes.
+
 ### Faster self-play and evaluation
 
 Use `--workers 8` to run games on eight CPU processes while the trainer batches

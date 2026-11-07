@@ -99,7 +99,10 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
             simulations = data.get("simulations", self.default_simulations)
             if type(simulations) is not int or not 1 <= simulations <= 1024:
                 raise ValueError("simulations must be an integer between 1 and 1024")
-            result = player.reply(moves, color, simulations=simulations)
+            claim_draw = data.get("claim_draw", False)
+            if type(claim_draw) is not bool:
+                raise ValueError("claim_draw must be a boolean")
+            result = player.reply(moves, color, simulations=simulations, claim_draw=claim_draw)
         except (OSError, ImportError) as exc:
             self.log_error("Cannot load champion: %s", exc)
             self._json(503, {"error": f"Cannot load champion: {exc}"})

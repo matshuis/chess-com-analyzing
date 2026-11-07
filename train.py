@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import copy
 import io
+import hashlib
+import json
 import random
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ import chess.pgn
 import torch
 
 from az_network import ChessNet
+from az_benchmark import tactical_scorecard
 from az_parallel import ParallelGames
 from az_replay import ReplayBuffer
 from az_selfplay import GameResult, evaluate_match, self_play_game
@@ -102,6 +105,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/az"))
+    parser.add_argument(
+        "--baseline-checkpoint", type=Path,
+        help="Frozen checkpoint for independent evaluation (never promoted or modified)",
+    )
+    parser.add_argument(
+        "--baseline-eval-games", type=int, default=0,
+        help="Additional paired baseline games per iteration (default: 0, disabled)",
+    )
     return parser
 
 
@@ -152,6 +163,10 @@ def _main(stack: ExitStack) -> int:
         raise ValueError("temperature-moves must be non-negative")
     if args.eval_games % 2:
         raise ValueError("eval-games must be even for color-swapped opening pairs")
+    if args.baseline_eval_games < 0 or args.baseline_eval_games % 2:
+        raise ValueError("baseline-eval-games must be non-negative and even")
+    if args.baseline_eval_games and args.baseline_checkpoint is None:
+        raise ValueError("baseline-eval-games requires --baseline-checkpoint")
     if not 0.5 <= args.promotion_score <= 1:
         raise ValueError("promotion-score must be between 0.5 and 1")
     if not np.isfinite(args.learning_rate) or args.learning_rate <= 0:
@@ -165,6 +180,10 @@ def _main(stack: ExitStack) -> int:
     champion_path = args.output_dir / "champion.pt"
     latest_path = args.output_dir / "latest.pt"
     replay_path = args.output_dir / "replay.npz"
+    if args.baseline_checkpoint is not None and args.baseline_checkpoint.resolve() in (
+        champion_path.resolve(), latest_path.resolve(),
+    ):
+        raise ValueError("Frozen baseline must be a separate copy, not the active checkpoint")
 
     model = ChessNet(channels=args.channels, blocks=args.blocks).to(device)
     start_iteration = 0
@@ -173,6 +192,15 @@ def _main(stack: ExitStack) -> int:
         start_iteration = int(checkpoint["iteration"])
         print(f"Loaded champion from iteration {start_iteration}")
     incumbent = copy.deepcopy(model).eval()
+    baseline = None
+    baseline_hash = None
+    if args.baseline_checkpoint is not None:
+        baseline_hash = hashlib.sha256(args.baseline_checkpoint.read_bytes()).hexdigest()
+        weights = torch.load(args.baseline_checkpoint, map_location=device, weights_only=True)
+        baseline = ChessNet(weights["channels"], weights["blocks"]).to(device)
+        baseline.load_state_dict(weights["state_dict"])
+        baseline.eval()
+        print(f"Loaded frozen baseline {args.baseline_checkpoint}; sha256={baseline_hash}")
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=1e-4
     )
@@ -224,6 +252,10 @@ def _main(stack: ExitStack) -> int:
         if args.workers > 1 else None
     )
     for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
+        if baseline is not None:
+            current_hash = hashlib.sha256(args.baseline_checkpoint.read_bytes()).hexdigest()
+            if current_hash != baseline_hash:
+                raise ValueError("Frozen baseline file changed during training")
         games_dir = args.output_dir / "games" / f"iteration-{iteration:06d}"
         print(f"Saving game records to {games_dir}")
         rng = random.Random(args.seed + iteration)
@@ -338,6 +370,64 @@ def _main(stack: ExitStack) -> int:
             f"move_cap={evaluation_move_caps}; candidate_score={score:.3f}; "
             f"promotion_threshold={args.promotion_score:.3f}"
         )
+        tactics = tactical_scorecard(model, args.eval_simulations, device)
+        print(f"iteration {iteration} tactics: {tactics['passed']}/{tactics['total']}")
+        baseline_score = None
+        baseline_results: list[GameResult] = []
+        if args.baseline_eval_games and baseline is not None:
+            def log_baseline(game: GameResult) -> None:
+                baseline_results.append(game)
+                number = len(baseline_results)
+                _save_game(
+                    games_dir / f"baseline-{number:03d}.pgn", game,
+                    {
+                        "Event": "Candidate vs frozen baseline", "Phase": "baseline",
+                        "White": "Candidate" if number % 2 else "Frozen baseline",
+                        "Black": "Frozen baseline" if number % 2 else "Candidate",
+                        "Iteration": str(iteration), "Round": f"{iteration}.{number}",
+                        "Simulations": str(args.eval_simulations),
+                        "BaselineSHA256": str(baseline_hash),
+                    },
+                )
+
+            if pool is None:
+                baseline_score = evaluate_match(
+                    model, baseline, games=args.baseline_eval_games,
+                    simulations=args.eval_simulations, max_plies=args.max_plies,
+                    device=device, on_game_end=log_baseline,
+                )
+            else:
+                original_models = pool.models
+                pool.models = (model, baseline)
+                try:
+                    baseline_score = pool.evaluate(
+                        args.baseline_eval_games, args.eval_simulations,
+                        args.max_plies, log_baseline,
+                    )
+                finally:
+                    pool.models = original_models
+            print(f"iteration {iteration} frozen_baseline_score={baseline_score:.3f}")
+        report = {
+            "iteration": iteration, "draw_rules": "optional-claims-v1",
+            "candidate_score": score, "tactics": tactics,
+            "baseline": {
+                "checkpoint": str(args.baseline_checkpoint) if baseline is not None else None,
+                "sha256": baseline_hash, "score": baseline_score,
+                "games": len(baseline_results),
+                "results": [
+                    {
+                        "candidate_result": game.white_score if index % 2 == 0 else -game.white_score,
+                        "reason": game.reason,
+                    }
+                    for index, game in enumerate(baseline_results)
+                ],
+            },
+        }
+        report_path = games_dir / "scorecard.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_report = report_path.with_suffix(".json.tmp")
+        temporary_report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        temporary_report.replace(report_path)
         promoted = score >= args.promotion_score
         if promoted:
             incumbent.load_state_dict(model.state_dict())

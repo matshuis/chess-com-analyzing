@@ -21,6 +21,8 @@ def test_self_play_records_claimable_repetition_without_inventing_a_move(monkeyp
     moves = ["g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1"]
 
     def search(self, board, *args, **kwargs):
+        if len(board.move_stack) == len(moves):
+            return {az_selfplay.CLAIM_DRAW: 1}
         return {board.parse_uci(moves[len(board.move_stack)]): 1}
 
     monkeypatch.setattr(az_selfplay.MCTS, "search", search)
@@ -47,7 +49,7 @@ def test_completed_repetition_is_annotated_and_original_board_is_unchanged():
     for uci in ["g1f3", "g8f6", "f3g1", "f6g8"] * 2:
         board.push_uci(uci)
     before = board.fen(), list(board.move_stack)
-    game = read_record(az_selfplay._game_result(board).pgn)
+    game = read_record(az_selfplay._game_result(board, claimed=True).pgn)
     assert (board.fen(), board.move_stack) == before
     assert "Position occurrence 3" in game.end().comment
     assert "previously seen after plies 0, 4" in game.end().comment

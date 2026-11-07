@@ -2434,6 +2434,7 @@ function stopChampionPlay() {
   championPlay.busy = false;
   championPlay.ended = false;
   document.getElementById("btn-champion-retry").hidden = true;
+  document.getElementById("btn-champion-claim").hidden = true;
   championStatus("");
 }
 
@@ -2447,12 +2448,14 @@ function championHistory() {
   });
 }
 
-async function requestChampionReply() {
+async function requestChampionReply(claimDraw = false) {
+  claimDraw = claimDraw === true;
   if (!championPlay.active || championPlay.busy || championPlay.ended) return;
   const generation = championPlay.generation;
   championPlay.busy = true;
   document.getElementById("btn-champion-retry").hidden = true;
-  championStatus("Champion is thinking...");
+  document.getElementById("btn-champion-claim").hidden = true;
+  championStatus(claimDraw ? "Claiming draw..." : "Champion is thinking...");
   try {
     const response = await fetch("/api/champion", {
       method: "POST",
@@ -2461,6 +2464,7 @@ async function requestChampionReply() {
         ...championPlay.settings,
         moves: championHistory(),
         human_color: championPlay.humanColor,
+        claim_draw: claimDraw,
       }),
     });
     const data = await response.json();
@@ -2476,6 +2480,7 @@ async function requestChampionReply() {
       }
     }
     championPlay.ended = !!data.result;
+    document.getElementById("btn-champion-claim").hidden = !data.claim_available || championPlay.ended;
     championStatus(data.result
       ? `Game over: ${data.result} (${data.reason.toLowerCase().replaceAll("_", " ")})`
       : "Your turn");
@@ -2483,13 +2488,15 @@ async function requestChampionReply() {
     if (generation !== championPlay.generation) return;
     console.error("Champion reply failed", error);
     championStatus(error.message, true);
-    document.getElementById("btn-champion-retry").hidden = false;
+    document.getElementById("btn-champion-retry").hidden = claimDraw;
+    document.getElementById("btn-champion-claim").hidden = !claimDraw;
   } finally {
     if (generation === championPlay.generation) championPlay.busy = false;
   }
 }
 
 async function startChampionPlay() {
+  document.getElementById("btn-champion-claim").hidden = true;
   resetFreePlay();
   championPlay.active = true;
   championPlay.humanColor = document.getElementById("champion-color").value;
@@ -2811,6 +2818,7 @@ function init() {
   els.btnReset?.addEventListener("click", resetFreePlay);
   document.getElementById("btn-champion").addEventListener("click", startChampionPlay);
   document.getElementById("btn-champion-retry").addEventListener("click", requestChampionReply);
+  document.getElementById("btn-champion-claim").addEventListener("click", () => requestChampionReply(true));
   els.board.addEventListener("click", onBoardClick);
   els.filterInput.addEventListener("input", renderGameList);
   els.btnToggleGames?.addEventListener("click", () => {

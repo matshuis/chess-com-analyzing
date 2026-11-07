@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from az_chess import encode_move, encode_position
+from az_rules import CLAIM_DRAW, claim_outcome
 
 
 @dataclass
@@ -60,7 +61,7 @@ class MCTS:
 
     @staticmethod
     def _terminal_value(board: chess.Board) -> float:
-        outcome = board.outcome(claim_draw=True)
+        outcome = board.outcome(claim_draw=False)
         if outcome is None:
             raise ValueError("Position is not terminal")
         if outcome.winner is None:
@@ -70,8 +71,13 @@ class MCTS:
     def _expand(self, node: Node, board: chess.Board) -> float:
         priors, value = self._predict(board)
         node.children = {move: Node(prior) for move, prior in priors.items()}
+        if claim_outcome(board) is not None:
+            claim_prior = 1.0 / (len(priors) + 1)
+            for child in node.children.values():
+                child.prior *= 1.0 - claim_prior
+            node.children[CLAIM_DRAW] = Node(claim_prior)
         node.expanded = True
-        return value
+        return max(0.0, value) if CLAIM_DRAW in node.children else value
 
     def _select_child(self, node: Node) -> tuple[chess.Move, Node]:
         scale = math.sqrt(max(node.visits, 1))
@@ -93,8 +99,20 @@ class MCTS:
     ) -> dict[chess.Move, int]:
         if simulations < 1:
             raise ValueError("simulations must be at least one")
-        if board.is_game_over(claim_draw=True):
+        if board.is_game_over(claim_draw=False):
             return {}
+
+        # A proven one-ply win outranks an optional draw regardless of policy priors.
+        mates = []
+        for move in board.legal_moves:
+            state = board.copy(stack=True)
+            state.push(move)
+            if state.is_checkmate():
+                mates.append(move)
+        if mates:
+            visits = {move: 0 for move in board.legal_moves}
+            visits[mates[0]] = simulations
+            return visits
 
         self.model.eval()
         root = Node(1.0)
@@ -115,13 +133,19 @@ class MCTS:
             node = root
             path = [node]
             outcome = None
+            claimed = False
 
             while node.expanded and node.children:
                 move, node = self._select_child(node)
-                state.push(move)
                 path.append(node)
-                outcome = state.outcome(claim_draw=True)
-                if outcome is not None:
+                if move == CLAIM_DRAW:
+                    claimed = True
+                    break
+                state.push(move)
+                outcome = state.outcome(claim_draw=False)
+                if claimed:
+                    value = 0.0
+                elif outcome is not None:
                     break
 
             if outcome is not None:
@@ -161,6 +185,7 @@ def visit_policy(
     board: chess.Board, visits: dict[chess.Move, int], temperature: float = 1.0
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return sparse action IDs and normalized visit-count probabilities."""
+    visits = {move: count for move, count in visits.items() if move != CLAIM_DRAW}
     if not visits:
         raise ValueError("Cannot create a policy from empty visits")
     if temperature <= 0:

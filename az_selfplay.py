@@ -13,6 +13,7 @@ import torch
 from az_chess import encode_position
 from az_mcts import MCTS, choose_move, visit_policy
 from az_replay import TrainingExample
+from az_rules import CLAIM_DRAW, claim_outcome
 
 
 # Short, fixed openings keep comparisons reproducible across iterations.
@@ -41,8 +42,14 @@ class GameResult:
     pgn: str = ""
 
 
-def _game_result(board: chess.Board, opening: tuple[str, ...] = ()) -> GameResult:
-    outcome = board.outcome(claim_draw=True)
+def _game_result(
+    board: chess.Board, opening: tuple[str, ...] = (), claimed: bool = False,
+) -> GameResult:
+    outcome = board.outcome(claim_draw=False)
+    if claimed:
+        outcome = claim_outcome(board)
+        if outcome is None:
+            raise ValueError("Cannot record an unavailable draw claim")
     result = outcome.result() if outcome else "1/2-1/2"
     reason = outcome.termination.name.lower() if outcome else "move_cap"
     game = chess.pgn.Game()
@@ -51,6 +58,7 @@ def _game_result(board: chess.Board, opening: tuple[str, ...] = ()) -> GameResul
     game.headers["Result"] = result
     game.headers["Termination"] = "normal" if outcome else "adjudication"
     game.headers["TerminationReason"] = reason
+    game.headers["DrawClaimed"] = "true" if claimed else "false"
     game.headers["FinalFEN"] = board.fen()
     game.headers["PlyCount"] = str(len(board.move_stack))
     game.headers["OpeningMoves"] = " ".join(opening)
@@ -89,14 +97,17 @@ def _game_result(board: chess.Board, opening: tuple[str, ...] = ()) -> GameResul
         result=result,
         reason=reason,
         move_cap=outcome is None,
-        white_score=_white_result(board),
+        white_score=(
+            0.0 if outcome is None or outcome.winner is None
+            else 1.0 if outcome.winner == chess.WHITE else -1.0
+        ),
         opening=opening,
         pgn=game.accept(chess.pgn.StringExporter(headers=True, variations=False, comments=True)),
     )
 
 
 def _white_result(board: chess.Board) -> float:
-    outcome = board.outcome(claim_draw=True)
+    outcome = board.outcome(claim_draw=False)
     if outcome is None or outcome.winner is None:
         return 0.0
     return 1.0 if outcome.winner == chess.WHITE else -1.0
@@ -120,22 +131,26 @@ def self_play_game(
         tuple[np.ndarray, np.ndarray, np.ndarray, chess.Color]
     ] = []
 
+    claimed = False
     for ply in range(max_plies):
-        if board.is_game_over(claim_draw=True):
+        if board.is_game_over(claim_draw=False):
             break
         visits = search.search(
             board, simulations=simulations, add_root_noise=True, rng=random_source
         )
         if not visits:
             break
-        state = encode_position(board)
-        actions, probabilities = visit_policy(board, visits, temperature=1.0)
         temperature = 1.0 if ply < temperature_moves else 0.0
         move = choose_move(visits, temperature=temperature, rng=random_source)
+        if move == CLAIM_DRAW:
+            claimed = True
+            break
+        state = encode_position(board)
+        actions, probabilities = visit_policy(board, visits, temperature=1.0)
         records.append((state, actions, probabilities, board.turn))
         board.push(move)
 
-    game_result = _game_result(board)
+    game_result = _game_result(board, claimed=claimed)
     if on_game_end is not None:
         on_game_end(game_result)
     result = game_result.white_score
@@ -172,10 +187,10 @@ def evaluate_match(
         board = chess.Board()
         for uci in opening:
             move = chess.Move.from_uci(uci)
-            if board.is_game_over(claim_draw=True) or move not in board.legal_moves:
+            if board.is_game_over(claim_draw=False) or move not in board.legal_moves:
                 raise ValueError(f"Invalid evaluation opening move: {uci}")
             board.push(move)
-        if board.is_game_over(claim_draw=True):
+        if board.is_game_over(claim_draw=False):
             raise ValueError("Evaluation openings must end in a non-terminal position")
         starting_boards.append(board)
     candidate_search = MCTS(candidate, device=device)
@@ -187,8 +202,9 @@ def evaluate_match(
         opening_index = (game_index // 2) % len(openings)
         opening = openings[opening_index]
         board = starting_boards[opening_index].copy(stack=True)
+        claimed = False
         for _ in range(max_plies):
-            if board.is_game_over(claim_draw=True):
+            if board.is_game_over(claim_draw=False):
                 break
             is_candidate_turn = board.turn == chess.WHITE and candidate_is_white
             is_candidate_turn |= board.turn == chess.BLACK and not candidate_is_white
@@ -196,9 +212,13 @@ def evaluate_match(
             visits = search.search(board, simulations, add_root_noise=False)
             if not visits:
                 break
-            board.push(choose_move(visits, temperature=0.0))
+            move = choose_move(visits, temperature=0.0)
+            if move == CLAIM_DRAW:
+                claimed = True
+                break
+            board.push(move)
 
-        game_result = _game_result(board, opening)
+        game_result = _game_result(board, opening, claimed=claimed)
         if on_game_end is not None:
             on_game_end(game_result)
         result = game_result.white_score

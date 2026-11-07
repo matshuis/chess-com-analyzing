@@ -11,6 +11,9 @@ import torch
 from az_network import ChessNet
 from az_play import ChampionPlayer
 from server import NoCacheHandler
+from az_benchmark import TACTICS, tactic_board
+from types import SimpleNamespace
+import az_play
 
 
 @pytest.fixture
@@ -53,11 +56,42 @@ def test_champion_reports_checkmate_without_search(champion):
         champion.reply(moves + ["e2e4"], "w")
 
 
-def test_champion_reports_claimable_draw(champion):
+def test_champion_can_choose_claimable_draw(champion, monkeypatch):
     moves = (["g1f3", "g8f6", "f3g1", "f6g8"] * 2)[:-1]
+    monkeypatch.setattr(champion.search, "search", lambda *args: {chess.Move.null(): 1})
     result = champion.reply(moves, "w")
     assert result["move"] is None
     assert result["result"] == "1/2-1/2"
+
+
+@pytest.mark.parametrize("case", TACTICS[:3])
+def test_champion_plays_mate_instead_of_claiming(champion, monkeypatch, case):
+    _, _, fen, history, expected = case
+    board = tactic_board(fen, history)
+    chess_proxy = SimpleNamespace(**vars(chess))
+    chess_proxy.Board = lambda: board.copy(stack=True)
+    monkeypatch.setattr(az_play, "chess", chess_proxy)
+    response = champion.reply([], "w")
+    assert response["move"] in expected
+    assert response["result"] == "0-1"
+    assert response["reason"] == "CHECKMATE"
+
+
+def test_human_can_claim_or_continue(champion, monkeypatch):
+    moves = ["g1f3", "g8f6", "f3g1", "f6g8"] * 2
+    result = champion.reply(moves, "w", claim_draw=True)
+    assert result["result"] == "1/2-1/2"
+    assert result["move"] is None
+    with pytest.raises(ValueError, match="No draw claim"):
+        champion.reply([], "w", claim_draw=True)
+    # Histories are accepted beyond the first claimable position.
+    monkeypatch.setattr(
+        champion.search, "search", lambda *args: {chess.Move.from_uci("f6g8"): 1},
+    )
+    result = champion.reply(moves + ["g1f3", "g8f6", "f3g1"], "w")
+    assert result["move"] == "f6g8"
+    assert result["result"] is None
+    assert result["claim_available"] is True
 
 
 @pytest.fixture
@@ -99,11 +133,23 @@ def test_champion_http_validates_requests_and_returns_moves(bridge):
         json.dumps({"moves": ["e2e5"], "human_color": "w"}),
         json.dumps({"moves": 5, "human_color": "w"}),
         json.dumps({"moves": [], "human_color": "invalid"}),
+        json.dumps({"moves": [], "human_color": "w", "claim_draw": "true"}),
+        json.dumps({"moves": [], "human_color": "w", "claim_draw": True}),
     ]:
         status, result = post(bridge, body)
         assert status == 400 and result["error"]
     status, result = post(bridge, "x" * 16_385)
     assert status == 400 and result["error"]
+
+
+def test_http_human_draw_claim(bridge):
+    status, result = post(bridge, json.dumps({
+        "moves": ["g1f3", "g8f6", "f3g1", "f6g8"] * 2,
+        "human_color": "w", "claim_draw": True,
+    }))
+    assert status == 200
+    assert result["result"] == "1/2-1/2"
+    assert result["move"] is None
 
 
 def test_champion_http_blocks_cross_origin_and_loads_lazily(bridge):
