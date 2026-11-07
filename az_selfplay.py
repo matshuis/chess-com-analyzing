@@ -64,7 +64,7 @@ def self_play_game(
     simulations: int,
     max_plies: int = 256,
     device: torch.device | str = "cpu",
-    temperature_moves: int = 30,
+    temperature_moves: int = 60,
     rng: random.Random | None = None,
     on_game_end: Callable[[GameResult], None] | None = None,
 ) -> list[TrainingExample]:

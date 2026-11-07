@@ -114,6 +114,14 @@ on CUDA when available, preserved while training on CPU, and initialized
 when resuming a CPU-only checkpoint.
 Training is intentionally opt-in and does not download data.
 
+Self-play samples moves from MCTS visit counts at temperature 1 for the first
+60 plies (30 full moves), then chooses the most-visited move. Configure this
+window with `--temperature-moves 60`; use `--temperature-moves 30` for the
+previous behavior or `--temperature-moves 0` to disable move sampling.
+The setting must be non-negative and affects only self-play: evaluation
+remains deterministic without exploration noise. Self-play still adds root
+exploration noise on every searched move, including after the sampling window.
+
 ### Training in Docker
 
 The training-only image includes PyTorch 2.7.1 with CUDA 12.8, plus the

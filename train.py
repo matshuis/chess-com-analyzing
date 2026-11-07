@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-games", type=int, default=4)
     parser.add_argument("--eval-simulations", type=int, default=32)
     parser.add_argument("--max-plies", type=int, default=256)
+    parser.add_argument(
+        "--temperature-moves", type=int, default=60,
+        help="Self-play plies sampled at temperature 1 before deterministic moves "
+             "(default: 60; 0 disables sampling; evaluation is unchanged)",
+    )
     parser.add_argument("--train-steps", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--buffer-size", type=int, default=50_000)
@@ -107,6 +112,8 @@ def main() -> int:
     invalid = [name for name, value in positive_values.items() if value < 1]
     if invalid:
         raise ValueError(f"These settings must be positive: {', '.join(invalid)}")
+    if args.temperature_moves < 0:
+        raise ValueError("temperature-moves must be non-negative")
     if args.eval_games % 2:
         raise ValueError("eval-games must be even for color-swapped opening pairs")
     if not 0.5 <= args.promotion_score <= 1:
@@ -185,6 +192,7 @@ def main() -> int:
                 simulations=args.simulations,
                 max_plies=args.max_plies,
                 device=device,
+                temperature_moves=args.temperature_moves,
                 rng=rng,
                 on_game_end=self_play_results.append,
             )
