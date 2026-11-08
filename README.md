@@ -92,6 +92,31 @@ dependencies, or `uv add --dev PACKAGE` for development tools; commit both
 intentional dependency refresh. Training and GUI commands use `uv run`;
 VS Code's Python debugger can continue using the `.venv` interpreter.
 
+### Optional MLflow tracking
+
+Install the optional tracking dependency group and enable tracking for a run:
+
+```bash
+uv sync --locked --group tracking
+uv run --group tracking train.py --mlflow --iterations 5 \
+  --baseline-checkpoint runs/baseline/champion.pt --baseline-eval-games 20
+```
+
+By default, MLflow uses a local SQLite database at `./mlflow.db` and the
+`chess-com-analyzing` experiment. Set `--mlflow-tracking-uri` to use another
+MLflow tracking server or store, and `--mlflow-experiment` to select another
+experiment. Each training invocation creates a run; iteration number is the
+metric step. Hyperparameters, losses, evaluation/promotion results, tactical
+checks, and optional fixed-baseline results are logged. The iteration
+`scorecard.json` is uploaded as an artifact; checkpoints and PGNs remain in the
+training output directory.
+
+Open the local tracking UI with:
+
+```bash
+uv run --group tracking mlflow ui --backend-store-uri sqlite:///mlflow.db
+```
+
 `--device auto` selects CUDA when the installed PyTorch build can use it and
 otherwise runs on CPU. The first run writes `runs/az/champion.pt`,
 `runs/az/latest.pt`, and `runs/az/replay.npz`; subsequent runs resume from

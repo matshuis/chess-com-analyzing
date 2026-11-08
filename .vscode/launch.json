@@ -11,6 +11,24 @@
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
       "justMyCode": true
+    },
+    {
+      "name": "MLflow UI (http://127.0.0.1:5000)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "mlflow",
+      "args": [
+        "ui",
+        "--backend-store-uri",
+        "sqlite:///mlflow.db",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5000"
+      ],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": true
     }
   ]
 }

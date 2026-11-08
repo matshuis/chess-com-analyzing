@@ -113,6 +113,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--baseline-eval-games", type=int, default=0,
         help="Additional paired baseline games per iteration (default: 0, disabled)",
     )
+    parser.add_argument(
+        "--mlflow", action="store_true",
+        help="Log training parameters, per-iteration metrics, and scorecards to MLflow",
+    )
+    parser.add_argument(
+        "--mlflow-tracking-uri",
+        help="MLflow tracking URI (default: MLflow's local ./mlruns store)",
+    )
+    parser.add_argument(
+        "--mlflow-experiment", default="chess-com-analyzing",
+        help="MLflow experiment name (default: chess-com-analyzing)",
+    )
     return parser
 
 
@@ -247,6 +259,48 @@ def _main(stack: ExitStack) -> int:
         f"Training on {device}; network={args.blocks}x{args.channels}, "
         f"replay capacity={args.buffer_size:,}; workers={args.workers}"
     )
+    mlflow = None
+    if args.mlflow:
+        try:
+            import mlflow as mlflow_module
+        except ImportError as exc:
+            raise RuntimeError(
+                "MLflow tracking was requested; install it with "
+                "`uv sync --group tracking`"
+            ) from exc
+        mlflow = mlflow_module
+        tracking_uri = args.mlflow_tracking_uri or "sqlite:///mlflow.db"
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(args.mlflow_experiment)
+        stack.enter_context(mlflow.start_run(
+            run_name=f"{args.output_dir.name}-iter-{start_iteration + 1}"
+        ))
+        mlflow.log_params({
+            "iterations": args.iterations,
+            "start_iteration": start_iteration,
+            "games_per_iteration": args.games_per_iteration,
+            "workers": args.workers,
+            "simulations": args.simulations,
+            "eval_games": args.eval_games,
+            "eval_simulations": args.eval_simulations,
+            "max_plies": args.max_plies,
+            "temperature_moves": args.temperature_moves,
+            "train_steps": args.train_steps,
+            "batch_size": args.batch_size,
+            "buffer_size": args.buffer_size,
+            "learning_rate": args.learning_rate,
+            "channels": args.channels,
+            "blocks": args.blocks,
+            "promotion_score": args.promotion_score,
+            "device": str(device),
+            "seed": args.seed,
+            "baseline_eval_games": args.baseline_eval_games,
+            "baseline_checkpoint_sha256": baseline_hash or "none",
+        })
+        print(
+            f"MLflow tracking enabled: experiment={args.mlflow_experiment!r}; "
+            f"tracking_uri={tracking_uri}"
+        )
     pool = (
         stack.enter_context(ParallelGames(model, incumbent, args.workers, device))
         if args.workers > 1 else None
@@ -446,6 +500,51 @@ def _main(stack: ExitStack) -> int:
         )
         print(f"Saved learner weights and optimizer to {latest_path}")
         replay.save(replay_path)
+        if mlflow is not None:
+            metrics = {
+                "train/policy_loss": policy_loss,
+                "train/value_loss": value_loss,
+                "train/replay_positions": len(replay),
+                "train/self_play_games": len(self_play_results),
+                "train/self_play_white_wins": sum(
+                    game.white_score > 0 for game in self_play_results
+                ),
+                "train/self_play_black_wins": sum(
+                    game.white_score < 0 for game in self_play_results
+                ),
+                "train/self_play_draws": sum(
+                    game.white_score == 0 for game in self_play_results
+                ),
+                "evaluation/candidate_score": score,
+                "evaluation/wins": sum(result > 0 for result in evaluation_results),
+                "evaluation/draws": sum(result == 0 for result in evaluation_results),
+                "evaluation/losses": sum(result < 0 for result in evaluation_results),
+                "evaluation/move_cap_games": evaluation_move_caps,
+                "evaluation/promoted": int(promoted),
+                "tactics/passed": tactics["passed"],
+                "tactics/total": tactics["total"],
+                "tactics/policy_passed": tactics["policy_passed"],
+            }
+            if baseline_score is not None:
+                metrics.update({
+                    "baseline/candidate_score": baseline_score,
+                    "baseline/wins": sum(
+                        (game.white_score if index % 2 == 0 else -game.white_score) > 0
+                        for index, game in enumerate(baseline_results)
+                    ),
+                    "baseline/draws": sum(
+                        game.white_score == 0 for game in baseline_results
+                    ),
+                    "baseline/losses": sum(
+                        (game.white_score if index % 2 == 0 else -game.white_score) < 0
+                        for index, game in enumerate(baseline_results)
+                    ),
+                })
+            mlflow.log_metrics(metrics, step=iteration)
+            mlflow.log_artifact(
+                str(report_path),
+                artifact_path=f"iterations/iteration-{iteration:06d}",
+            )
         print(
             f"iteration {iteration}: policy_loss={policy_loss:.4f}, "
             f"value_loss={value_loss:.4f}, candidate_score={score:.3f}"

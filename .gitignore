@@ -216,6 +216,9 @@ __marimo__/
 
 # AlphaZero checkpoints and replay data
 runs*/
+mlruns/
+mlflow.db*
+mlartifacts/
 
 # Streamlit
 .streamlit/secrets.toml

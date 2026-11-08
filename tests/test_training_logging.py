@@ -1,5 +1,9 @@
 """Game ending and training log regression tests."""
+import json
 import sys
+from contextlib import nullcontext
+from types import SimpleNamespace
+
 import chess.pgn
 
 import pytest
@@ -118,6 +122,54 @@ def test_training_rejects_negative_sampling_window(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="temperature-moves must be non-negative"):
         train.main()
     assert not output_dir.exists()
+
+
+def test_training_logs_mlflow_metrics_and_scorecard(
+    tmp_path, monkeypatch, capsys,
+):
+    calls = {
+        "params": None, "metrics": None, "artifact": None,
+        "experiment": None, "tracking_uri": None,
+    }
+    fake_mlflow = SimpleNamespace(
+        set_tracking_uri=lambda uri: calls.update(tracking_uri=uri),
+        set_experiment=lambda name: calls.update(experiment=name),
+        start_run=lambda **kwargs: nullcontext(),
+        log_params=lambda params: calls.update(params=params),
+        log_metrics=lambda metrics, step: calls.update(metrics=(metrics, step)),
+        log_artifact=lambda path, artifact_path: calls.update(
+            artifact=(path, artifact_path)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    monkeypatch.setattr(sys, "argv", [
+        "train.py", "--device", "cpu", "--iterations", "1",
+        "--games-per-iteration", "1", "--simulations", "1",
+        "--eval-games", "2", "--eval-simulations", "1",
+        "--max-plies", "2", "--train-steps", "1", "--batch-size", "2",
+        "--channels", "16", "--blocks", "1", "--output-dir", str(tmp_path),
+        "--mlflow",
+    ])
+
+    assert train.main() == 0
+
+    assert calls["experiment"] == "chess-com-analyzing"
+    assert calls["tracking_uri"] == "sqlite:///mlflow.db"
+    assert calls["params"]["learning_rate"] == 0.001
+    metrics, step = calls["metrics"]
+    assert step == 1
+    assert metrics["evaluation/candidate_score"] == 0.5
+    assert metrics["evaluation/promoted"] == 0
+    scorecard = json.loads(
+        (tmp_path / "games" / "iteration-000001" / "scorecard.json").read_text()
+    )
+    assert metrics["tactics/passed"] == scorecard["tactics"]["passed"]
+    assert metrics["tactics/total"] == 5
+    assert calls["artifact"] == (
+        str(tmp_path / "games" / "iteration-000001" / "scorecard.json"),
+        "iterations/iteration-000001",
+    )
+    assert "MLflow tracking enabled" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("temperature_moves", [None, 0, 2, 30, 60])
