@@ -117,6 +117,11 @@ Open the local tracking UI with:
 uv run --group tracking mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
+Alternatively, after installing the tracking dependency group, select
+**MLflow UI (http://127.0.0.1:5000)** in VS Code's **Run and Debug** panel
+and press **F5**. Use the workspace `.venv` interpreter, then open
+http://127.0.0.1:5000 in your browser.
+
 `--device auto` selects CUDA when the installed PyTorch build can use it and
 otherwise runs on CPU. The first run writes `runs/az/champion.pt`,
 `runs/az/latest.pt`, and `runs/az/replay.npz`; subsequent runs resume from
