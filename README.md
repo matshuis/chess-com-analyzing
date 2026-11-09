@@ -147,6 +147,14 @@ state, training initializes the learner from `champion.pt` with a fresh
 optimizer (old optimizer state was never saved). Keep all three files together
 when resuming or backing up. The iteration number on the champion records
 the last completed iteration, not necessarily the last promotion.
+Replay saves use a temporary file and atomic replacement, so an interrupted
+write does not overwrite the previous complete replay archive. Checkpoints
+and replay are still saved separately, not as one atomic iteration snapshot.
+If an older run has an unreadable replay archive, preserve it and restore a
+validated MLflow backup. Restore all three files from the same iteration for
+an exact saved state. Alternatively, deliberately restoring only an older
+replay retains newer model/optimizer progress but loses newer replay examples;
+this is not an exact resume. Training does not silently skip corrupt replay.
 Changing `--learning-rate` on resume updates the rate while keeping optimizer
 moments. Switching CPU/CUDA retains optimizer state; the scaler is restored
 on CUDA when available, preserved while training on CPU, and initialized

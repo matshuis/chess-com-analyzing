@@ -82,14 +82,20 @@ class ReplayBuffer:
             actions = np.empty((0,), dtype=np.int16)
             probabilities = np.empty((0,), dtype=np.float32)
             offsets = np.zeros(1, dtype=np.int64)
-        np.savez_compressed(
-            target,
-            states=states,
-            outcomes=outcomes,
-            actions=actions,
-            probabilities=probabilities,
-            offsets=offsets,
-        )
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        try:
+            with temporary.open("wb") as stream:
+                np.savez_compressed(
+                    stream,
+                    states=states,
+                    outcomes=outcomes,
+                    actions=actions,
+                    probabilities=probabilities,
+                    offsets=offsets,
+                )
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     @classmethod
     def load(cls, path: str | Path, capacity: int = 50_000) -> "ReplayBuffer":

@@ -2,6 +2,7 @@ import random
 
 import chess
 import numpy as np
+import pytest
 
 from az_chess import ACTION_SIZE, BOARD_FEATURES, decode_action, encode_move, encode_position
 from az_mcts import MCTS, choose_move, visit_policy
@@ -98,3 +99,46 @@ def test_replay_rejects_malformed_examples():
                 0.0,
             )
         )
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("error", [OSError, KeyboardInterrupt])
+def test_interrupted_replay_save_preserves_previous_file(tmp_path, monkeypatch, existing, error):
+    replay = ReplayBuffer()
+    path = tmp_path / "replay.npz"
+    if existing:
+        replay.save(path)
+        original = path.read_bytes()
+
+    def interrupted_save(stream, **arrays):
+        stream.write(b"incomplete archive")
+        raise error("interrupted replay write")
+
+    monkeypatch.setattr(np, "savez_compressed", interrupted_save)
+    with pytest.raises(error, match="interrupted replay write"):
+        replay.save(path)
+
+    if existing:
+        assert path.read_bytes() == original
+        assert len(ReplayBuffer.load(path)) == 0
+    else:
+        assert not path.exists()
+    assert not path.with_suffix(".npz.tmp").exists()
+
+
+def test_replay_save_replaces_existing_archive(tmp_path):
+    replay = ReplayBuffer()
+    path = tmp_path / "replay.npz"
+    replay.save(path)
+    assert len(ReplayBuffer.load(path)) == 0
+    replay.add(TrainingExample(
+        np.zeros((BOARD_FEATURES, 8, 8)),
+        np.asarray([0]),
+        np.asarray([1.0]),
+        1.0,
+    ))
+    replay.save(path)
+    restored = ReplayBuffer.load(path)
+    assert len(restored) == 1
+    assert restored.sample(1)[0].outcome == 1.0
+    assert not path.with_suffix(".npz.tmp").exists()
