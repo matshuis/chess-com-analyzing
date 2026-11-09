@@ -11,6 +11,7 @@ import pytest
 import az_selfplay
 import train
 from az_network import ChessNet
+from az_benchmark import TACTICS
 
 
 @pytest.mark.parametrize("max_plies,expected_result,expected_reason", [
@@ -170,7 +171,7 @@ def test_training_logs_mlflow_metrics_and_scorecard(
         (tmp_path / "games" / "iteration-000001" / "scorecard.json").read_text()
     )
     assert metrics["tactics/passed"] == scorecard["tactics"]["passed"]
-    assert metrics["tactics/total"] == 5
+    assert metrics["tactics/total"] == len(TACTICS)
     assert (
         str(tmp_path / "games" / "iteration-000001" / "scorecard.json"),
         "iterations/iteration-000001",

@@ -130,14 +130,16 @@ def test_search_prefers_known_draw_to_known_loss():
 
 def test_scorecard_includes_separate_mate_and_capture_cases():
     report = tactical_scorecard(UniformModel(), 128, "cpu")
-    assert report["total"] == 5
+    assert report["total"] == len(TACTICS)
+    assert report["suite_version"] == 2
     assert all(case["passed"] for case in report["cases"][:3])
     assert all(case["claim_available"] for case in report["cases"][:3])
-    assert [case["category"] for case in report["cases"]] == ["mate"] * 3 + ["capture"] * 2
+    assert [case["category"] for case in report["cases"][:5]] == ["mate"] * 3 + ["capture"] * 2
 
 
 @pytest.mark.parametrize("workers", [1, 2])
-def test_frozen_baseline_saved_without_mutation(tmp_path, monkeypatch, workers):
+@pytest.mark.parametrize("suite", ["legacy-v1", "expanded-v2"])
+def test_frozen_baseline_saved_without_mutation(tmp_path, monkeypatch, workers, suite):
     model = ChessNet(16, 1)
     baseline = tmp_path / "frozen.pt"
     train._save_checkpoint(baseline, model, 5, False, 16, 1)
@@ -150,6 +152,7 @@ def test_frozen_baseline_saved_without_mutation(tmp_path, monkeypatch, workers):
         "--max-plies", "2", "--train-steps", "1", "--batch-size", "2",
         "--channels", "16", "--blocks", "1", "--output-dir", str(output),
         "--baseline-checkpoint", str(baseline), "--baseline-eval-games", "2",
+        "--evaluation-suite", suite,
     ])
     assert train.main() == 0
     assert baseline.read_bytes() == original
@@ -158,10 +161,16 @@ def test_frozen_baseline_saved_without_mutation(tmp_path, monkeypatch, workers):
         folder = output / "games" / f"iteration-{iteration:06d}"
         report = json.loads((folder / "scorecard.json").read_text())
         assert report["baseline"]["score"] == 0.5
+        assert report["evaluation_suite"] == suite
+        assert report["evaluation_openings"] == (20 if suite == "expanded-v2" else 10)
         assert report["baseline"]["games"] == 2
-        assert report["tactics"]["total"] == 5
+        assert report["tactics"]["total"] == len(TACTICS)
         hashes.append(report["baseline"]["sha256"])
         assert len(list(folder.glob("baseline-*.pgn"))) == 2
+        for path in [folder / "baseline-001.pgn", folder / "evaluation-001.pgn"]:
+            with path.open() as handle:
+                game = chess.pgn.read_game(handle)
+            assert game.headers["EvaluationSuite"] == suite
     assert hashes[0] == hashes[1]
 
 

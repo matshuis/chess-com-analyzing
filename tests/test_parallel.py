@@ -12,7 +12,7 @@ import train
 from az_chess import ACTION_SIZE
 from az_parallel import ParallelGames
 from az_replay import ReplayBuffer, TrainingExample
-from az_selfplay import evaluate_match, self_play_game
+from az_selfplay import EXPANDED_EVALUATION_OPENINGS, evaluate_match, self_play_game
 
 
 class UniformModel(nn.Module):
@@ -67,6 +67,21 @@ def test_worker_failure_is_reported_and_workers_are_stopped():
             processes = list(pool.processes)
             list(pool.self_play(2, 0, 2, 60, 1))
     assert all(not process.is_alive() for process in processes)
+
+
+def test_parallel_expanded_evaluation_matches_sequential():
+    model = UniformModel()
+    actual, expected = [], []
+    with ParallelGames(model, model, workers=2, device="cpu") as pool:
+        score = pool.evaluate(
+            40, 1, 1, actual.append, openings=EXPANDED_EVALUATION_OPENINGS,
+        )
+    expected_score = evaluate_match(
+        model, model, games=40, simulations=1, max_plies=1,
+        on_game_end=expected.append, openings=EXPANDED_EVALUATION_OPENINGS,
+    )
+    assert score == expected_score
+    assert actual == expected
 
 
 def test_abrupt_worker_exit_does_not_hang():

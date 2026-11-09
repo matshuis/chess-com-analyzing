@@ -213,13 +213,22 @@ gradually replace it; pre-fix and post-fix evaluation scores are not directly
 comparable.
 
 Each iteration saves `scorecard.json` beside its PGNs. It records the promotion
-match score and a versioned five-position tactical suite: the three recorded
-claimable mate positions plus white/black hanging-queen captures. Each case
+match score and a versioned 11-position tactical suite: the three recorded
+claimable mate positions, five hanging-queen captures (rook, knight, bishop,
+and pawn), a capture-promotion, and two defensive positions from iteration 67.
+Defensive checks accept every legal move that avoids allowing mate in one;
+they do not claim to identify the best strategic move. Each case
 includes the selected search move, expected moves, and the network's independent
-top legal policy move and probability mass on the expected moves. Mate checks
+top legal policy move and probability mass on the expected moves. It also
+records root-child priors, visits, and mean values from the searching player's
+perspective (`null` for unvisited children). Forced mate-in-one decisions are
+marked `mate_safeguard` and have no search-tree statistics. Mate checks
 exercise the deterministic mate-in-one safeguard, not learned strength; use
 policy scores and capture checks as additional signals. This tiny suite is a
-regression scorecard, not a comprehensive chess-strength rating.
+regression scorecard, not a comprehensive chess-strength rating. Suite version 2
+preserves the original five positions first, adds six cases, and removes an
+illegal alternative move from the first mate case. Compare individual cases,
+not aggregate pass counts, with older scorecards.
 
 For a fixed reference opponent, supply a separate backed-up checkpoint:
 
@@ -238,7 +247,8 @@ in memory across iterations; their SHA-256 is logged, included in baseline
 PGNs and the JSON scorecard, and checked for file changes each iteration.
 The active learner/champion paths cannot be used as the baseline. Baseline
 models can have different network dimensions. Results are saved as
-`baseline-001.pgn`, etc.; counts above 20 still repeat the fixed opening suite.
+`baseline-001.pgn`, etc.; counts above twice the selected opening-suite size
+repeat positions rather than adding independent starts.
 Keep this file unchanged across experiments. Docker includes the new rule and
 scorecard modules; rebuild the image after these changes.
 
@@ -399,6 +409,18 @@ is played twice with candidate colors swapped and identical search budgets.
 `--eval-games` must be even: 20 games cover all ten openings, four games
 cover the first two, and counts above 20 cycle through the same opening
 suite (so they do not add new independent starting positions).
+This default is named `--evaluation-suite legacy-v1` and remains unchanged.
+For broader evaluation, use `--evaluation-suite expanded-v2 --eval-games 40`
+and, when using a frozen baseline, `--baseline-eval-games 40`. The expanded
+suite interleaves the ten original openings with ten distinct six-ply lines,
+including Ruy Lopez, Italian, Petroff, and additional Sicilian, Caro-Kann,
+Queen's Gambit, Indian, English, and Reti positions. Twenty games cover its
+first ten openings; forty cover all twenty with colors swapped. Both champion
+and baseline matches use the selected suite in sequential and parallel modes.
+The suite name is stored in PGNs, scorecards, and MLflow parameters.
+Changing suites starts a new evaluation series: do not compare aggregate
+scores directly with the legacy suite. Self-play and promotion thresholds
+are unchanged. Use a separate MLflow experiment for expanded-suite runs.
 The order is fixed across iterations for reproducible comparisons; search
 remains noise-free. Opening moves are preserved in board history for the
 network and repetition detection. `--max-plies` allows that many searched

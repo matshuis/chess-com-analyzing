@@ -44,6 +44,7 @@ class MCTS:
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.noise_fraction = noise_fraction
+        self.root: Node | None = None
 
     def _predict(self, board: chess.Board) -> tuple[dict[chess.Move, float], float]:
         encoded = torch.from_numpy(encode_position(board)).unsqueeze(0)
@@ -97,6 +98,7 @@ class MCTS:
         add_root_noise: bool = False,
         rng: random.Random | None = None,
     ) -> dict[chess.Move, int]:
+        self.root = None
         if simulations < 1:
             raise ValueError("simulations must be at least one")
         if board.is_game_over(claim_draw=False):
@@ -116,6 +118,7 @@ class MCTS:
 
         self.model.eval()
         root = Node(1.0)
+        self.root = root
         self._expand(root, board)
         if add_root_noise and root.children:
             random_source = rng or random

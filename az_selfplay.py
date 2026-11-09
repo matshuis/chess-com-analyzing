@@ -30,6 +30,23 @@ EVALUATION_OPENINGS: tuple[tuple[str, ...], ...] = (
     ("g1f3", "d7d5", "g2g3", "g8f6"),
 )
 
+EXPANDED_EVALUATION_OPENINGS = tuple(
+    opening
+    for pair in zip(EVALUATION_OPENINGS, (
+        ("e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"),
+        ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "f8c5"),
+        ("e2e4", "e7e5", "g1f3", "g8f6", "f3e5", "d7d6"),
+        ("e2e4", "c7c5", "g1f3", "b8c6", "d2d4", "c5d4"),
+        ("e2e4", "c7c6", "d2d4", "d7d5", "b1c3", "d5e4"),
+        ("d2d4", "d7d5", "c2c4", "d5c4", "g1f3", "g8f6"),
+        ("d2d4", "g8f6", "c2c4", "e7e6", "b1c3", "f8b4"),
+        ("d2d4", "g8f6", "c2c4", "g7g6", "b1c3", "d7d5"),
+        ("c2c4", "c7c5", "b1c3", "b8c6", "g2g3", "g7g6"),
+        ("g1f3", "d7d5", "c2c4", "d5d4", "b2b4", "g8f6"),
+    ))
+    for opening in pair
+)
+
 
 @dataclass(frozen=True)
 class GameResult:

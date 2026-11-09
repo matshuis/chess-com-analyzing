@@ -61,6 +61,32 @@ def test_odd_length_opening_preserves_turn_and_history(monkeypatch):
     assert players == [incumbent, candidate]
 
 
+def test_expanded_suite_adds_distinct_legal_positions_and_keeps_pairs(monkeypatch):
+    openings = az_selfplay.EXPANDED_EVALUATION_OPENINGS
+    assert len(openings) == 20
+    assert openings[::2] == az_selfplay.EVALUATION_OPENINGS
+    positions = []
+    for opening in openings:
+        board = chess.Board()
+        for uci in opening:
+            board.push_uci(uci)
+        assert board.is_valid() and not board.is_game_over()
+        positions.append(board.fen())
+    assert len(set(positions)) == 20
+    starts = []
+
+    def search(self, board, *args, **kwargs):
+        starts.append(tuple(move.uci() for move in board.move_stack))
+        return {next(iter(board.legal_moves)): 1}
+
+    monkeypatch.setattr(az_selfplay.MCTS, "search", search)
+    model = ChessNet(16, 1)
+    az_selfplay.evaluate_match(
+        model, model, games=40, simulations=1, max_plies=1, openings=openings,
+    )
+    assert starts == [opening for opening in openings for _ in range(2)]
+
+
 @pytest.mark.parametrize("games,openings", [
     (1, ((),)), (3, ((),)), (2, ()),
     (2, (("e2e5",),)),

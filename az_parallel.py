@@ -204,13 +204,16 @@ class ParallelGames:
     def evaluate(
         self, games: int, simulations: int, max_plies: int,
         on_game_end: Callable[[GameResult], None],
+        openings: tuple[tuple[str, ...], ...] = EVALUATION_OPENINGS,
     ) -> float:
         if games < 2 or games % 2:
             raise ValueError("games must be a positive even number")
+        if not openings:
+            raise ValueError("Evaluation openings must not be empty")
         jobs = [
             _Job(
                 index, True, simulations, max_plies,
-                opening=EVALUATION_OPENINGS[index % len(EVALUATION_OPENINGS)],
+                opening=openings[index % len(openings)],
             )
             for index in range(games // 2)
         ]

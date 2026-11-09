@@ -17,10 +17,13 @@ import chess.pgn
 import torch
 
 from az_network import ChessNet
-from az_benchmark import tactical_scorecard
+from az_benchmark import TACTICAL_SUITE_VERSION, tactical_scorecard
 from az_parallel import ParallelGames
 from az_replay import ReplayBuffer
-from az_selfplay import GameResult, evaluate_match, self_play_game
+from az_selfplay import (
+    EVALUATION_OPENINGS, EXPANDED_EVALUATION_OPENINGS,
+    GameResult, evaluate_match, self_play_game,
+)
 from az_training import train_network
 
 
@@ -89,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--simulations", type=int, default=48)
     parser.add_argument("--eval-games", type=int, default=4)
     parser.add_argument("--eval-simulations", type=int, default=32)
+    parser.add_argument(
+        "--evaluation-suite", choices=("legacy-v1", "expanded-v2"), default="legacy-v1",
+        help="Paired opening suite: legacy-v1 (10 openings) or expanded-v2 (20)",
+    )
     parser.add_argument("--max-plies", type=int, default=256)
     parser.add_argument(
         "--temperature-moves", type=int, default=60,
@@ -156,6 +163,10 @@ def main() -> int:
 
 def _main(stack: ExitStack) -> int:
     args = build_parser().parse_args()
+    evaluation_openings = (
+        EXPANDED_EVALUATION_OPENINGS
+        if args.evaluation_suite == "expanded-v2" else EVALUATION_OPENINGS
+    )
     positive_values = {
         "iterations": args.iterations,
         "games-per-iteration": args.games_per_iteration,
@@ -283,6 +294,9 @@ def _main(stack: ExitStack) -> int:
             "simulations": args.simulations,
             "eval_games": args.eval_games,
             "eval_simulations": args.eval_simulations,
+            "evaluation_suite": args.evaluation_suite,
+            "evaluation_openings": len(evaluation_openings),
+            "tactical_suite_version": TACTICAL_SUITE_VERSION,
             "max_plies": args.max_plies,
             "temperature_moves": args.temperature_moves,
             "train_steps": args.train_steps,
@@ -394,6 +408,7 @@ def _main(stack: ExitStack) -> int:
                     "Black": "Champion" if candidate_is_white else "Candidate",
                     "Round": f"{iteration}.{len(evaluation_results)}",
                     "Iteration": str(iteration), "Phase": "evaluation",
+                    "EvaluationSuite": args.evaluation_suite,
                     "Simulations": str(args.eval_simulations),
                 },
             )
@@ -416,10 +431,12 @@ def _main(stack: ExitStack) -> int:
                 max_plies=args.max_plies,
                 device=device,
                 on_game_end=log_evaluation,
+                openings=evaluation_openings,
             )
         else:
             score = pool.evaluate(
                 args.eval_games, args.eval_simulations, args.max_plies, log_evaluation,
+                openings=evaluation_openings,
             )
         print(
             f"iteration {iteration} evaluation summary: "
@@ -446,6 +463,7 @@ def _main(stack: ExitStack) -> int:
                         "Iteration": str(iteration), "Round": f"{iteration}.{number}",
                         "Simulations": str(args.eval_simulations),
                         "BaselineSHA256": str(baseline_hash),
+                        "EvaluationSuite": args.evaluation_suite,
                     },
                 )
 
@@ -454,6 +472,7 @@ def _main(stack: ExitStack) -> int:
                     model, baseline, games=args.baseline_eval_games,
                     simulations=args.eval_simulations, max_plies=args.max_plies,
                     device=device, on_game_end=log_baseline,
+                    openings=evaluation_openings,
                 )
             else:
                 original_models = pool.models
@@ -462,12 +481,15 @@ def _main(stack: ExitStack) -> int:
                     baseline_score = pool.evaluate(
                         args.baseline_eval_games, args.eval_simulations,
                         args.max_plies, log_baseline,
+                        openings=evaluation_openings,
                     )
                 finally:
                     pool.models = original_models
             print(f"iteration {iteration} frozen_baseline_score={baseline_score:.3f}")
         report = {
             "iteration": iteration, "draw_rules": "optional-claims-v1",
+            "evaluation_suite": args.evaluation_suite,
+            "evaluation_openings": len(evaluation_openings),
             "candidate_score": score, "tactics": tactics,
             "baseline": {
                 "checkpoint": str(args.baseline_checkpoint) if baseline is not None else None,
