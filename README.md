@@ -363,6 +363,11 @@ To castle, click your king and then g1/c1 (White) or g8/c8 (Black).
 The destination is offered only when castling is legal; the rook moves
 automatically.
 
+Use **Hints: on/off** below the board to toggle tactical arrows, hanging-piece
+warnings, opening advice, and move annotations/evaluations. Hints start enabled
+and the setting stays in effect across games until the page is reloaded.
+Legal-move indicators remain available when hints are off.
+
 The server validates the complete UCI history with python-chess, preserving
 the network's position history and draw rules. The status label reports
 thinking, errors, and game results. **Retry reply** retries a failed request.

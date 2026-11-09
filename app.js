@@ -1084,6 +1084,7 @@ const state = {
   suggestions: [null],
   ply: 0, // index into positions
   orientation: "w", // "w" = white at the bottom, "b" = black at the bottom
+  hintsEnabled: true,
 };
 
 const els = {
@@ -1110,6 +1111,7 @@ const els = {
   btnEnd:       document.getElementById("btn-end"),
   btnFlip:      document.getElementById("btn-flip"),
   btnReset:     document.getElementById("btn-reset"),
+  btnHints:     document.getElementById("btn-hints"),
   plyInd:       document.getElementById("ply-indicator"),
   moveList:     document.getElementById("move-list"),
   feedback:     document.getElementById("move-feedback"),
@@ -1347,13 +1349,13 @@ function renderMoveList() {
       span.className = "ply";
       if (ply < total) {
         const positionIdx = ply + 1; // positions index after this move
-        const blunder       = state.blunders[positionIdx];
-        const good          = state.goodMoves[positionIdx];
-        const mateAllowed   = state.matesAllowed?.[positionIdx];
-        const mateDelivered = state.matesDelivered?.[positionIdx];
-        const pinExecuted   = state.pinsExecuted?.[positionIdx];
-        const suggestion    = state.suggestions?.[positionIdx];
-        const evalScore     = state.evals?.[positionIdx];
+        const blunder       = state.hintsEnabled && state.blunders[positionIdx];
+        const good          = state.hintsEnabled && state.goodMoves[positionIdx];
+        const mateAllowed   = state.hintsEnabled && state.matesAllowed?.[positionIdx];
+        const mateDelivered = state.hintsEnabled && state.matesDelivered?.[positionIdx];
+        const pinExecuted   = state.hintsEnabled && state.pinsExecuted?.[positionIdx];
+        const suggestion    = state.hintsEnabled && state.suggestions?.[positionIdx];
+        const evalScore     = state.hintsEnabled ? state.evals?.[positionIdx] : null;
         let label = state.sanList[ply];
         // Precedence (most important first):
         //   1. mateDelivered — game-ending, definitely shown.
@@ -1454,6 +1456,10 @@ function renderMoveFeedback() {
   if (!fb) return;
   fb.className = "";
   fb.textContent = "";
+  if (!state.hintsEnabled) {
+    fb.hidden = true;
+    return;
+  }
   const idx = state.ply;
   if (idx <= 0) {
     // Even at the starting position we may want to highlight that the
@@ -1534,6 +1540,10 @@ function renderHangingWarning() {
   panel.innerHTML = "";
   // Clear any stale square outlines first.
   for (const cell of els.board.children) cell.classList.remove("hanging");
+  if (!state.hintsEnabled) {
+    panel.hidden = true;
+    return;
+  }
 
   const idx = state.ply;
   const pos = state.positions[idx];
@@ -1617,6 +1627,10 @@ function renderOpeningInfo() {
   const panel = els.openingInfo;
   if (!panel) return;
   panel.innerHTML = "";
+  if (!state.hintsEnabled) {
+    panel.hidden = true;
+    return;
+  }
 
   // Build the SAN-token list from the moves played up to the current
   // ply, stripped of any check/mate suffix so they match book format.
@@ -1953,6 +1967,7 @@ function renderForkArrows() {
   const svg = els.boardOverlay;
   if (!svg) return;
   svg.innerHTML = "";
+  if (!state.hintsEnabled) return;
 
   const idx = state.ply;
   const blunder       = state.ply > 0 ? state.blunders[idx]    : null;
@@ -2791,6 +2806,17 @@ function updateFreePlayChrome() {
   }
 }
 
+function toggleHints() {
+  state.hintsEnabled = !state.hintsEnabled;
+  els.btnHints.textContent = state.hintsEnabled ? "Hints: on" : "Hints: off";
+  els.btnHints.setAttribute("aria-pressed", String(state.hintsEnabled));
+  renderMoveList();
+  renderMoveFeedback();
+  renderHangingWarning();
+  renderOpeningInfo();
+  renderForkArrows();
+}
+
 // ---- Wire-up ---------------------------------------------------------
 function init() {
   buildBoardSquares();
@@ -2816,6 +2842,7 @@ function init() {
     setPly(state.ply); // re-render board contents into the rebuilt cells
   });
   els.btnReset?.addEventListener("click", resetFreePlay);
+  els.btnHints.addEventListener("click", toggleHints);
   document.getElementById("btn-champion").addEventListener("click", startChampionPlay);
   document.getElementById("btn-champion-retry").addEventListener("click", requestChampionReply);
   document.getElementById("btn-champion-claim").addEventListener("click", () => requestChampionReply(true));

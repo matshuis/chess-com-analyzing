@@ -400,6 +400,7 @@ body.games-collapsed main {
 /* ---- Controls + move list ---------------------------------------- */
 #controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
   flex: 0 0 auto;
