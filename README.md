@@ -355,7 +355,7 @@ uv run server.py
 
 Open http://localhost:8000, set the **Checkpoint** project-relative path
 (default `runs/az/champion.pt`), **Device** (Auto, CPU, or CUDA GPU), and
-**Simulations** (1-1024). Select White or Black next to **Play as**, and
+**Simulations** (1-1024, default 512). Select White or Black next to **Play as**, and
 click **Play champion** to load the model. Click a piece and its destination on the existing
 board. The champion replies automatically; when playing Black, it makes
 the opening move. Human pawn promotions currently auto-promote to queens.
@@ -371,8 +371,8 @@ You can review earlier moves, but must return to the latest move to play.
 champion mode. Starting **Play champion** again begins a fresh game.
 
 The checkpoint supplies its own network dimensions, so no `--channels` or
-`--blocks` flags are needed. Use 16 simulations for faster replies or
-64-128 for more search. Settings are captured when starting a game; click
+`--blocks` flags are needed. The default is 512 simulations per move; use
+16-128 for faster replies with less search. Settings are captured when starting a game; click
 **Play champion** again to apply changes. Updated checkpoint files reload
 automatically on the next request. Paths must point to `.pt` files inside
 the project. Dependencies load lazily, so the analyzer alone still runs

@@ -12,7 +12,7 @@ from az_rules import CLAIM_DRAW, claim_outcome
 
 
 class ChampionPlayer:
-    def __init__(self, checkpoint: Path, device: str = "auto", simulations: int = 64) -> None:
+    def __init__(self, checkpoint: Path, device: str = "auto", simulations: int = 512) -> None:
         if simulations < 1:
             raise ValueError("simulations must be positive")
         if device == "auto":

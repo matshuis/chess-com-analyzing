@@ -33,7 +33,7 @@ class NoCacheHandler(SimpleHTTPRequestHandler):
     champion_key: tuple[Path, str, int] | None = None
     default_checkpoint = Path("runs/az/champion.pt")
     default_device = "auto"
-    default_simulations = 64
+    default_simulations = 512
 
     def _player(self, data: dict) -> ChampionPlayer:
         checkpoint = data.get("checkpoint", str(self.default_checkpoint))
@@ -124,7 +124,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--champion", type=Path, help="Enable play against this champion checkpoint")
     parser.add_argument("--device", default="auto", help="Champion inference device (auto, cpu, cuda)")
-    parser.add_argument("--simulations", type=int, default=64, help="MCTS simulations per champion move")
+    parser.add_argument("--simulations", type=int, default=512, help="MCTS simulations per champion move")
     args = parser.parse_args()
 
     NoCacheHandler.default_checkpoint = args.champion or Path("runs/az/champion.pt")

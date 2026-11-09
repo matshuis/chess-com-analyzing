@@ -1,7 +1,9 @@
 """Champion inference and the existing GUI's HTTP bridge."""
 import json
+import re
 from http.client import HTTPConnection
 from http.server import HTTPServer
+from pathlib import Path
 from threading import Thread
 
 import chess
@@ -24,6 +26,25 @@ def champion(tmp_path):
         "channels": 16, "blocks": 1, "state_dict": model.state_dict(),
     }, path)
     return ChampionPlayer(path, device="cpu", simulations=2)
+
+
+def test_champion_defaults_to_512_simulations(tmp_path, champion, monkeypatch):
+    player = ChampionPlayer(tmp_path / "champion.pt", device="cpu")
+    assert player.simulations == NoCacheHandler.default_simulations == 512
+    counts = []
+
+    def search(board, simulations):
+        counts.append(simulations)
+        return {chess.Move.from_uci("e2e4"): 1}
+
+    monkeypatch.setattr(player.search, "search", search)
+    assert player.reply([], "b")["move"] == "e2e4"
+    assert counts == [512]
+
+    html = (Path(__file__).resolve().parents[1] / "index.html").read_text()
+    control = re.search(r'<input\b[^>]*id="champion-simulations"[^>]*>', html)
+    assert control is not None
+    assert 'value="512"' in control.group()
 
 
 def test_champion_replies_legally_for_either_human_color(champion):
