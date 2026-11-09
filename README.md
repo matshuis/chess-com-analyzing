@@ -108,8 +108,17 @@ MLflow tracking server or store, and `--mlflow-experiment` to select another
 experiment. Each training invocation creates a run; iteration number is the
 metric step. Hyperparameters, losses, evaluation/promotion results, tactical
 checks, and optional fixed-baseline results are logged. The iteration
-`scorecard.json` is uploaded as an artifact; checkpoints and PGNs remain in the
-training output directory.
+`scorecard.json` is uploaded as an artifact. The frozen baseline is stored once
+under `baseline/`, and existing champion, learner, and replay files are archived
+under `initial_state/` at startup. Each completed iteration uploads `champion.pt`,
+`latest.pt` (including optimizer and scaler state), and `replay.npz` under
+`iterations/iteration-NNNNNN/checkpoints/`, including rejected learners.
+Local files remain the source for training resume and GUI play; PGNs stay local.
+To restore an archived iteration, download all three files from the same
+`checkpoints/` directory into your training output directory before resuming.
+Allow roughly 190 MB of artifact storage per iteration with the default network.
+Artifact uploads happen after local iteration state is saved; upload errors stop
+the run explicitly rather than silently discarding tracking data.
 
 Open the local tracking UI with:
 

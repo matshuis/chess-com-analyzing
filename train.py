@@ -297,6 +297,11 @@ def _main(stack: ExitStack) -> int:
             "baseline_eval_games": args.baseline_eval_games,
             "baseline_checkpoint_sha256": baseline_hash or "none",
         })
+        if args.baseline_checkpoint is not None:
+            mlflow.log_artifact(str(args.baseline_checkpoint), artifact_path="baseline")
+        for path in (champion_path, latest_path, replay_path):
+            if path.exists():
+                mlflow.log_artifact(str(path), artifact_path="initial_state")
         print(
             f"MLflow tracking enabled: experiment={args.mlflow_experiment!r}; "
             f"tracking_uri={tracking_uri}"
@@ -545,6 +550,11 @@ def _main(stack: ExitStack) -> int:
                 str(report_path),
                 artifact_path=f"iterations/iteration-{iteration:06d}",
             )
+            for path in (champion_path, latest_path, replay_path):
+                mlflow.log_artifact(
+                    str(path),
+                    artifact_path=f"iterations/iteration-{iteration:06d}/checkpoints",
+                )
         print(
             f"iteration {iteration}: policy_loss={policy_loss:.4f}, "
             f"value_loss={value_loss:.4f}, candidate_score={score:.3f}"

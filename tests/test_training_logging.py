@@ -124,11 +124,12 @@ def test_training_rejects_negative_sampling_window(tmp_path, monkeypatch):
     assert not output_dir.exists()
 
 
+@pytest.mark.parametrize("with_baseline", [False, True])
 def test_training_logs_mlflow_metrics_and_scorecard(
-    tmp_path, monkeypatch, capsys,
+    tmp_path, monkeypatch, capsys, with_baseline,
 ):
     calls = {
-        "params": None, "metrics": None, "artifact": None,
+        "params": None, "metrics": None, "artifacts": [],
         "experiment": None, "tracking_uri": None,
     }
     fake_mlflow = SimpleNamespace(
@@ -137,10 +138,13 @@ def test_training_logs_mlflow_metrics_and_scorecard(
         start_run=lambda **kwargs: nullcontext(),
         log_params=lambda params: calls.update(params=params),
         log_metrics=lambda metrics, step: calls.update(metrics=(metrics, step)),
-        log_artifact=lambda path, artifact_path: calls.update(
-            artifact=(path, artifact_path)
+        log_artifact=lambda path, artifact_path: calls["artifacts"].append(
+            (path, artifact_path)
         ),
     )
+    baseline = tmp_path / "baseline" / "champion.pt"
+    if with_baseline:
+        train._save_checkpoint(baseline, ChessNet(16, 1), 0, False, 16, 1)
     monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
     monkeypatch.setattr(sys, "argv", [
         "train.py", "--device", "cpu", "--iterations", "1",
@@ -149,7 +153,9 @@ def test_training_logs_mlflow_metrics_and_scorecard(
         "--max-plies", "2", "--train-steps", "1", "--batch-size", "2",
         "--channels", "16", "--blocks", "1", "--output-dir", str(tmp_path),
         "--mlflow",
-    ])
+    ] + ([
+        "--baseline-checkpoint", str(baseline), "--baseline-eval-games", "2",
+    ] if with_baseline else []))
 
     assert train.main() == 0
 
@@ -165,11 +171,27 @@ def test_training_logs_mlflow_metrics_and_scorecard(
     )
     assert metrics["tactics/passed"] == scorecard["tactics"]["passed"]
     assert metrics["tactics/total"] == 5
-    assert calls["artifact"] == (
+    assert (
         str(tmp_path / "games" / "iteration-000001" / "scorecard.json"),
         "iterations/iteration-000001",
-    )
+    ) in calls["artifacts"]
+    for name in ("champion.pt", "latest.pt", "replay.npz"):
+        assert (
+            str(tmp_path / name), "iterations/iteration-000001/checkpoints",
+        ) in calls["artifacts"]
+    assert ((str(baseline), "baseline") in calls["artifacts"]) == with_baseline
+    assert ("baseline/candidate_score" in metrics) == with_baseline
     assert "MLflow tracking enabled" in capsys.readouterr().out
+
+    calls["artifacts"].clear()
+    assert train.main() == 0
+    assert calls["params"]["start_iteration"] == 1
+    assert calls["metrics"][1] == 2
+    for name in ("champion.pt", "latest.pt", "replay.npz"):
+        assert (str(tmp_path / name), "initial_state") in calls["artifacts"]
+        assert (
+            str(tmp_path / name), "iterations/iteration-000002/checkpoints",
+        ) in calls["artifacts"]
 
 
 @pytest.mark.parametrize("temperature_moves", [None, 0, 2, 30, 60])
